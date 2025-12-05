@@ -24,7 +24,7 @@ def run_pixel_matching(golden_image: np.ndarray, aligned_image: np.ndarray, pixe
     diff = cv2.absdiff(golden_gray, aligned_gray)
 
     thresh_val = int(pixel_thresh)
-    _, thresh = cv2.threshold(diff, thresh_val, 255, cv2.THRESH_BINARY)
+    _, thresh = cv2.threshold(diff, thresh_val, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
     kernel = np.ones((5,5),np.uint8)
     opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
     closing = cv2.morphologyEX(opening, cv2.MORPH_CLOSE, kernel)                     
@@ -63,4 +63,5 @@ def run_pixel_matching(golden_image: np.ndarray, aligned_image: np.ndarray, pixe
         'contour_map': contour_image,
         'anomaly_mask': dilated  # NEW: Binary mask of anomalies
     }
+
 
