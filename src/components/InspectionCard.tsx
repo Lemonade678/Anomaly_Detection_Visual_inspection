@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { TestImage, GoldenImage, AnalysisResult } from '../types'
+import DefectViewer from './DefectViewer'
 import './InspectionCard.css'
 
 interface SwipeState {
@@ -23,6 +24,7 @@ function InspectionCard() {
     isDragging: false,
   })
   const [feedback, setFeedback] = useState<string>('')
+  const [showDefectViewer, setShowDefectViewer] = useState(false)
   const cardRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -281,6 +283,13 @@ function InspectionCard() {
           ← Reject
         </button>
         <button
+          className="action-btn crop"
+          onClick={() => setShowDefectViewer(true)}
+          title="View and Crop Defects"
+        >
+          🔍 Examine Defects
+        </button>
+        <button
           className="action-btn review"
           onClick={() => handleSwipe('up')}
           title="Review Later (Swipe Up)"
@@ -299,8 +308,17 @@ function InspectionCard() {
       {feedback && <div className="feedback-toast">{feedback}</div>}
 
       <div className="instructions">
-        <p>← Swipe Left: Reject | ↑ Swipe Up: Review Later | Swipe Right →: Accept</p>
+        <p>← Swipe Left: Reject | 🔍 Click to examine | ↑ Swipe Up: Review Later | Swipe Right →: Accept</p>
       </div>
+
+      {showDefectViewer && analysisResult && currentImage.golden_image && (
+        <DefectViewer
+          testImageUrl={currentImage.image_path}
+          masterImageUrl={currentImage.golden_image.image_path}
+          analysisResult={analysisResult}
+          onClose={() => setShowDefectViewer(false)}
+        />
+      )}
     </div>
   )
 }
