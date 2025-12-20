@@ -4,7 +4,7 @@ import numpy as np
 
 
 def run_pixel_matching(golden_image: np.ndarray, aligned_image: np.ndarray, pixel_thresh: int, count_thresh: int,
-                       area_thresh: float = 20.0, min_contour_area: int = 50):
+                       area_thresh: float = 20.0, min_contour_area: int = 50, mask: np.ndarray = None):
     """Run pixel-based anomaly detection and return results dict.
     
     Now counts TOTAL ANOMALOUS PIXELS instead of just contour count.
@@ -22,6 +22,10 @@ def run_pixel_matching(golden_image: np.ndarray, aligned_image: np.ndarray, pixe
     golden_gray = cv2.cvtColor(golden_image, cv2.COLOR_BGR2GRAY)
     aligned_gray = cv2.cvtColor(aligned_image, cv2.COLOR_BGR2GRAY)
     diff = cv2.absdiff(golden_gray, aligned_gray)
+
+    # Apply mask if provided (ignore borders)
+    if mask is not None:
+        diff = cv2.bitwise_and(diff, diff, mask=mask)
 
     thresh_val = int(pixel_thresh)
     _, thresh = cv2.threshold(diff, thresh_val, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
@@ -63,5 +67,6 @@ def run_pixel_matching(golden_image: np.ndarray, aligned_image: np.ndarray, pixe
         'contour_map': contour_image,
         'anomaly_mask': dilated  # NEW: Binary mask of anomalies
     }
+
 
 
