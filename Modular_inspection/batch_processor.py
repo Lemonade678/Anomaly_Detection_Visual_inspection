@@ -147,7 +147,7 @@ class BatchInspector:
         
         # Align the test strip to master
         try:
-            aligned_test, (dx, dy), response = align_images(master_strip, test_strip)
+            aligned_test, (dx, dy), response,mask = align_images(master_strip, test_strip)
             
             if response < 0.1:
                 return {
@@ -189,7 +189,9 @@ class BatchInspector:
             master_strip, 
             aligned_test,
             self.pixel_thresh, 
-            self.count_thresh
+            self.count_thresh,
+            self.count_thresh,
+            mask=mask
         )
         
         verdict = 'ANOMALY' if pixel_res['verdict'] == 'Anomaly' else 'NORMAL'
@@ -293,3 +295,4 @@ class BatchInspector:
             'fail_count': fail_count,
             'defect_rate': f"{(defective_strips / total_strips * 100) if total_strips > 0 else 0:.2f}%"
         }
+
