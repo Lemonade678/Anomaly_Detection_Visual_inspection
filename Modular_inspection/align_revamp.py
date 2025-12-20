@@ -12,6 +12,12 @@ import cv2
 import numpy as np
 from typing import Tuple, Optional
 
+#add function to equalize the histogram of the image by using CLAHE
+def equalize_histogram(image: np.ndarray) -> np.ndarray:
+    """Equalize the histogram of the image."""
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    return clahe.apply(image)
+
 # Configuration constants
 MAX_NUM_FEATURES = 2000  # Increased for better matching
 GOOD_MATCH_PERCENT = 0.15  # Top 15% of matches
@@ -36,6 +42,7 @@ def align_images(golden_image: np.ndarray, test_image: np.ndarray,
         aligned_image: Test image aligned to match golden image
         shift: Approximate (dx, dy) translation component
         response: Match quality score (0.0 to 1.0, higher is better)
+        valid_mask: Binary mask (255=valid, 0=border) indicating valid image area
     """
     # Ensure same size - resize test to match golden
     h_golden, w_golden = golden_image.shape[:2]
@@ -45,24 +52,30 @@ def align_images(golden_image: np.ndarray, test_image: np.ndarray,
     golden_gray = cv2.cvtColor(golden_image, cv2.COLOR_BGR2GRAY)
     test_gray = cv2.cvtColor(test_resized, cv2.COLOR_BGR2GRAY)
 
+                   
+    #equalization of histogram
+    Equalized_golden_gray = equalize_histogram(golden_gray)
+    Equalized_test_gray = equalize_histogram(test_gray)
+
     # Detect ORB features and compute descriptors
     orb = cv2.ORB_create(MAX_NUM_FEATURES)
-    keypoints_golden, descriptors_golden = orb.detectAndCompute(golden_gray, None)
-    keypoints_test, descriptors_test = orb.detectAndCompute(test_gray, None)
+    keypoints_golden, descriptors_golden = orb.detectAndCompute(Equalized_golden_gray, None)
+    keypoints_test, descriptors_test = orb.detectAndCompute(Equalized_test_gray, None)
 
     # Handle edge cases where no features are detected
+    full_mask = np.ones(test_resized.shape[:2], dtype=np.uint8) * 255
     if descriptors_golden is None or descriptors_test is None:
-        return test_resized, (0.0, 0.0), 0.0
+        return test_resized, (0.0, 0.0), 0.0 ,full_mask
     
     if len(keypoints_golden) < MIN_MATCH_COUNT or len(keypoints_test) < MIN_MATCH_COUNT:
-        return test_resized, (0.0, 0.0), 0.1
+        return test_resized, (0.0, 0.0), 0.1 , full_mask
 
     # Match features using Brute-Force Hamming distance
     matcher = cv2.DescriptorMatcher_create(cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_HAMMING)
     matches = matcher.match(descriptors_test, descriptors_golden, None)
 
     if len(matches) < MIN_MATCH_COUNT:
-        return test_resized, (0.0, 0.0), 0.1
+        return test_resized, (0.0, 0.0), 0.1, full_mask
 
     # Sort matches by distance (lower distance = better match)
     matches = sorted(matches, key=lambda x: x.distance)
@@ -90,7 +103,7 @@ def align_images(golden_image: np.ndarray, test_image: np.ndarray,
     h_matrix, mask = cv2.findHomography(points_test, points_golden, cv2.RANSAC, 5.0)
 
     if h_matrix is None:
-        return test_resized, (0.0, 0.0), 0.1
+        return test_resized, (0.0, 0.0), 0.1, full_mask
 
     # Extract approximate translation from homography matrix
     # H = [[a, b, tx], [c, d, ty], [e, f, 1]]
@@ -108,12 +121,25 @@ def align_images(golden_image: np.ndarray, test_image: np.ndarray,
         borderValue=border_value
     )
 
+        #create a mask of the aligned image
+    dummy_mask = np.ones((test_resized.shape[0], test_resized.shape[1]), dtype=np.uint8) * 255
+
+    valid_area_mask = cv2.warpPerspective(
+        dummy_mask, 
+        h_matrix, 
+        (width, height),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0
+    )
+    
+
     # Adjust response based on inlier ratio (how many matches survived RANSAC)
     if mask is not None:
         inlier_ratio = np.sum(mask) / len(mask)
         response = response * inlier_ratio  # Penalize if many outliers
 
-    return aligned_image, (float(dx), float(dy)), float(response)
+    return aligned_image, (float(dx), float(dy)), float(response), valid_area_mask
 
 
 def align_images_with_debug(golden_image: np.ndarray, test_image: np.ndarray,
@@ -165,4 +191,5 @@ def align_images_with_debug(golden_image: np.ndarray, test_image: np.ndarray,
         cv2.imwrite(debug_path, match_img)
     
     # Continue with alignment (call main function)
+
     return align_images(golden_image, test_image)
