@@ -105,7 +105,7 @@ class GridAnalyzer:
             return result
 
         try:
-            aligned_segment, (dx, dy), confidence = align_images(golden_segment, test_segment)
+            aligned_segment, (dx, dy), confidence,mask = align_images(golden_segment, test_segment)
 
             if confidence < 0.1:
                 result['confidence'] = confidence
@@ -122,7 +122,8 @@ class GridAnalyzer:
                 golden_segment,
                 aligned_segment,
                 pixel_thresh=self.pixel_diff_threshold,
-                count_thresh=self.count_threshold
+                count_thresh=self.count_threshold,
+                mask=mask
             )
 
             result['pixel_diff_score'] = pixel_result['area_score']
@@ -219,3 +220,4 @@ class GridAnalyzer:
                     cv2.rectangle(viz_image, (x_start, y_start), (x_end, y_end), (128, 128, 128), 1)
 
         return viz_image
+
