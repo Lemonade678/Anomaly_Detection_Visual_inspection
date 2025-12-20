@@ -1,4 +1,4 @@
-"""
+v"""
 Inspection GUI Module - Main Application
 ========================================
 Complete GUI application for visual inspection anomaly detection.
@@ -24,9 +24,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 from inspection.io import read_image
-from inspection.align_revamp import align_images
-from inspection.ssim import calc_ssim
-from inspection.pixel_match import run_pixel_matching
+from inspection.hybrid import InspectionProcessor
 
 # Configuration constants
 SSIM_PASS_THRESHOLD = 0.975  # Images above this SSIM score are considered normal
@@ -57,6 +55,9 @@ class InspectorProApp(tk.Tk):
         self.Sample_image = None
         self.ssim_score = 0.0
         self.ssim_heatmap = None
+
+        # Core Processor
+        self.processor = InspectionProcessor()
 
         # For saving high-res images
         self.last_pixel_heatmap = None
@@ -388,6 +389,7 @@ STEPS:
         self.original_golden_image = None  # Reset original
         self.golden_cropped = False
         self._golden_loaded = True
+        self.processor.set_golden_image(self.golden_image, path)
         self.golden_display.config(text=f"Golden: ...{os.path.basename(path)[-20:]}", foreground="#00FF41")
         self.golden_crop_status.config(text="")
         self.reset_golden_btn.config(state=tk.DISABLED)
@@ -453,6 +455,7 @@ STEPS:
         if accepted:
             self.golden_image = cropped
             self.golden_cropped = True
+            self.processor.set_golden_image(self.golden_image, "Cropped_Golden")
             self.golden_crop_status.config(text="✓ Cropped", foreground="#00FF41")
             self.reset_golden_btn.config(state=tk.NORMAL)
             self.status_bar_text.set(f"STATUS: Golden image cropped ({cropped.shape[1]}x{cropped.shape[0]})")
@@ -464,6 +467,7 @@ STEPS:
         if self.original_golden_image is not None:
             self.golden_image = self.original_golden_image.copy()
             self.golden_cropped = False
+            self.processor.set_golden_image(self.golden_image, "Reset_Golden")
             self.golden_crop_status.config(text="")
             self.reset_golden_btn.config(state=tk.DISABLED)
             self.status_bar_text.set("STATUS: Golden image reset to original.")
@@ -581,14 +585,7 @@ STEPS:
 
     def _process_single_image(self, test_image_path, preloaded=None):
         """
-        Main inspection pipeline.
-        
-        Steps:
-        1. Load/preprocess test image
-        2. Optional auto-crop
-        3. ORB-based alignment
-        4. SSIM structural check
-        5. Pixel matching (if SSIM fails)
+        Main inspection pipeline delegated to InspectionProcessor.
         """
         start_time = time.time()
         self.status_bar_text.set(f"STATUS: Processing: {os.path.basename(test_image_path)}...")
@@ -597,82 +594,54 @@ STEPS:
         # Step 1: Load image
         try:
             test_image = preloaded if preloaded is not None else read_image(test_image_path)
+            if test_image is None:
+                raise ValueError("Image read failed")
         except Exception as e:
-            self._log_result(test_image_path, "LOAD_ERROR", 0, 0, "N/A", time.time() - start_time, 0)
             messagebox.showerror("Load Error", f"Could not read test image:\n{test_image_path}\n\n{e}")
             self.status_bar_text.set(f"ERROR: Failed to load test image")
             return
 
-        # Step 2: Auto-crop if enabled
-        current_golden = self.golden_image
-        if self.auto_crop_var.get():
-            self.status_bar_text.set("STATUS: Auto-Cropping substrate...")
-            self.update_idletasks()
-            try:
-                from inspection.edge_detection import run_edge_detection
-                test_crops = run_edge_detection(test_image)
-                if test_crops:
-                    test_image = test_crops[0]
-                golden_crops = run_edge_detection(current_golden)
-                if golden_crops:
-                    current_golden = golden_crops[0]
-            except ImportError:
-                pass  # edge_detection not available
+        # Delegate to processor
+        results = self.processor.process_image(
+            test_image=test_image,
+            test_path=test_image_path,
+            auto_crop=self.auto_crop_var.get(),
+            pixel_diff_thresh=int(self.pixel_slider.get()),
+            count_thresh=int(self.count_slider.get())
+        )
 
-        # Step 3: Resize and align
-        self.status_bar_text.set("STATUS: Aligning (ORB Feature Matching)...")
-        self.update_idletasks()
-        h, w = current_golden.shape[:2]
-        test_image = cv2.resize(test_image, (w, h))
-        
-        try:
-            self.aligned_test_image, (dx, dy), response = align_images(current_golden, test_image)
-            if response < 0.1:
-                self._log_result(test_image_path, "ALIGN_ERROR", 0, 0, "Low ORB Match", time.time() - start_time, 0)
-                messagebox.showwarning("Alignment Error", f"ORB matching failed (confidence: {response:.2f})")
-                self.status_bar_text.set("ERROR: Alignment failed (ORB Feature Matching)")
-                return
-        except Exception as e:
-            self._log_result(test_image_path, "ALIGN_ERROR", 0, 0, str(e), time.time() - start_time, 0)
-            messagebox.showwarning("Alignment Error", f"An error occurred during alignment:\n{e}")
-            self.status_bar_text.set("ERROR: Alignment failed")
+        # Handle errors
+        if 'error' in results:
+            if results.get('verdict') == "ALIGN_FAIL":
+                messagebox.showwarning("Alignment Error", results['error'])
+            else:
+                messagebox.showerror("Processing Error", results['error'])
+            self.status_bar_text.set(f"ERROR: {results['error']}")
             return
 
-        self.Sample_image = self.aligned_test_image
+        # Update GUI state
+        self.aligned_test_image = results.get('aligned_image')
+        self.Sample_image = self.aligned_test_image # Alias
+        self.ssim_score = results.get('ssim_score', 0.0)
+        self.ssim_heatmap = results.get('ssim_heatmap')
         
-        # Step 4: SSIM Check
-        self.status_bar_text.set("STATUS: Running SSIM check...")
-        self.update_idletasks()
-        self.ssim_score, self.ssim_heatmap = calc_ssim(current_golden, self.Sample_image)
-
-        if self.ssim_score > SSIM_PASS_THRESHOLD:
-            # SSIM Pass - Normal
-            processing_time = time.time() - start_time
-            self._log_result(test_image_path, "Normal (SSIM)", 0, 0, "N/A (SSIM Pass)", processing_time, self.ssim_score)
+        verdict = results.get('verdict', "Unknown")
+        pixel_res = results.get('pixel_result')
+        
+        if "SSIM" in verdict:
+            # SSIM Pass
             self._update_gui_for_ssim_pass()
-            self.status_bar_text.set(f"STATUS: SSIM Pass in {processing_time:.2f}s. Verdict: Normal")
-            self.status_label.config(foreground="#00FF41")
-            return
-
-        # Step 5: Pixel Matching
-        self.status_bar_text.set(f"STATUS: SSIM failed ({self.ssim_score:.3f}). Running pixel analysis...")
-        self.update_idletasks()
-        pixel_res = run_pixel_matching(current_golden, self.Sample_image, 
-                                       int(self.pixel_slider.get()), int(self.count_slider.get()))
-
-        if pixel_res['verdict'] == "Anomaly":
-            final_verdict = "!! ANOMALY DETECTED !!"
-            final_color = "#FF0000"
+            final_color = "#00FF41"
         else:
-            final_verdict, final_color = "Normal", "#00FF41"
-
-        self._update_gui(pixel_res, final_verdict, final_color)
+            # Pixel Match
+            if pixel_res:
+                final_color = "#FF0000" if pixel_res['verdict'] == "Anomaly" else "#00FF41"
+                self._update_gui(pixel_res, verdict, final_color)
+            else:
+                final_color = "#FFFF00" # Should not happen if not SSIM pass
+        
         processing_time = time.time() - start_time
-
-        self._log_result(test_image_path, final_verdict, pixel_res['area_score'], 
-                        pixel_res['anomaly_count'], pixel_res['verdict'], processing_time, self.ssim_score)
-
-        self.status_bar_text.set(f"STATUS: Completed in {processing_time:.2f}s. Verdict: {final_verdict}")
+        self.status_bar_text.set(f"STATUS: Completed in {processing_time:.2f}s. Verdict: {verdict}")
         self.status_label.config(foreground=final_color)
 
     # ==========================================================================
@@ -825,3 +794,4 @@ STEPS:
 if __name__ == "__main__":
     app = InspectorProApp()
     app.mainloop()
+
