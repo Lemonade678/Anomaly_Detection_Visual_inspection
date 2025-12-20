@@ -1,0 +1,29 @@
+{
+  "substrate_type": "Type 1",
+  "part_number": "FBY3108-23EB1",
+  "overall substrate dimension": {
+    "width_mm_lower_bound": 42.89,
+    "width_mm_upper_bound": 43.11,
+    "length_mm_lower_bound": 170.02,
+    "length_mm_upper_bound": 170.28,
+    "thickness_mm_upper_bound": 0.64,
+    "thickness_mm_lower_bound": 0.58,
+    "__remark__comment": " Substrate has 24 pcs per sheet"
+  },
+  "physical_dimensions(1pcs)": {
+    "width_mm": 13.87,
+    "length_mm": 9.58
+  },
+  "bonding_pad_specs(1pcs)": {
+    "width_um": 80,
+    "length_um": 150,
+    "tolerance_um": 5
+  },
+  "inspection_parameters": {
+    "pixel_ratio_calibration": 1.0,
+    "alignment_threshold": 0.8,
+    "defect_threshold_area": 10,
+    "golden_sample_path": "assets/golden_samples/type1_golden.png",
+    "roi_mask_path": "assets/masks/type1_mask.png"
+  }
+}
