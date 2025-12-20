@@ -1,4 +1,4 @@
-v"""
+"""
 Inspection GUI Module - Main Application
 ========================================
 Complete GUI application for visual inspection anomaly detection.
@@ -794,4 +794,5 @@ STEPS:
 if __name__ == "__main__":
     app = InspectorProApp()
     app.mainloop()
+
 
