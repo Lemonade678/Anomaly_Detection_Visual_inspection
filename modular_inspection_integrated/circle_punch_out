@@ -1,0 +1,86 @@
+import cv2
+import numpy as np
+import os
+
+def extract_masked_pads(image_path, output_folder='extracted_pads_circular'):
+    # 1. Load Image
+    img = cv2.imread(image_path)
+    if img is None:
+        print("Error: Image not found.")
+        return
+
+    # Create output directory
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    # 2. Preprocessing & Color Segmentation
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    lower_gold = np.array([15, 60, 60]) 
+    upper_gold = np.array([35, 255, 255]) 
+    mask = cv2.inRange(hsv, lower_gold, upper_gold)
+
+    # Clean up noise
+    kernel = np.ones((5, 5), np.uint8)
+    mask_clean = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask_clean = cv2.dilate(mask_clean, kernel, iterations=1)
+
+    # 3. Find Contours
+    contours, _ = cv2.findContours(mask_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    pad_count = 0
+
+    print(f"Processing {len(contours)} candidates...")
+
+    for cnt in contours:
+        # --- Geometric Filtering (Same as before) ---
+        area = cv2.contourArea(cnt)
+        if area < 300 or area > 5000: continue
+
+        x, y, w, h = cv2.boundingRect(cnt)
+        aspect_ratio = float(w) / h
+        if not (0.8 < aspect_ratio < 1.2): continue
+
+        perimeter = cv2.arcLength(cnt, True)
+        if perimeter == 0: continue
+        circularity = 4 * np.pi * (area / (perimeter * perimeter))
+        if circularity < 0.7: continue
+
+        # --- NEW: Extract ONLY the Circle ---
+        
+        # 1. Add padding to ensure we don't clip edges
+        padding = 2
+        x_pad = max(0, x - padding)
+        y_pad = max(0, y - padding)
+        w_pad = min(img.shape[1] - x_pad, w + 2*padding)
+        h_pad = min(img.shape[0] - y_pad, h + 2*padding)
+
+        # 2. Crop the square Region of Interest (ROI)
+        roi_bgr = img[y_pad:y_pad+h_pad, x_pad:x_pad+w_pad]
+
+        # 3. Create a circular mask for this specific ROI
+        # Create a black image of the same size as the ROI
+        mask_roi = np.zeros((h_pad, w_pad), dtype=np.uint8)
+        
+        # Draw a filled white circle in the center of the mask
+        center_x = w_pad // 2
+        center_y = h_pad // 2
+        radius = min(w_pad, h_pad) // 2
+        cv2.circle(mask_roi, (center_x, center_y), radius, 255, -1)
+
+        # 4. Create an Alpha channel (Transparency)
+        # We split the BGR image into 3 channels
+        b, g, r = cv2.split(roi_bgr)
+        
+        # Add the mask as the 4th channel (Alpha)
+        # Anything "black" in the mask becomes transparent
+        roi_png = cv2.merge([b, g, r, mask_roi])
+
+        # 5. Save as PNG (PNG supports transparency)
+        pad_count += 1
+        filename = f"{output_folder}/pad_{pad_count}.png"
+        cv2.imwrite(filename, roi_png)
+
+    print(f"Done! Extracted {pad_count} circular pads to '{output_folder}/'")
+
+# Usage
+extract_masked_pads(r'C:\Users\User\Downloads\antigravity_soft\456.png')
