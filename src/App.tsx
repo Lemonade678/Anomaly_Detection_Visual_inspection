@@ -134,7 +134,7 @@ function LoginScreen({ setUser }: { setUser: (user: any) => void }) {
     <div className="login-container">
       <div className="login-card">
         <h1>Defect Inspector</h1>
-        <p className="subtitle">Tinder-style defect detection system</p>
+        <p className="subtitle">Professional image processing and quality assurance system</p>
 
         <form onSubmit={handleAuth}>
           <div className="form-group">

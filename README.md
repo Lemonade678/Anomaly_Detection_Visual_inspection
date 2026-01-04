@@ -1,10 +1,10 @@
-# Defect Inspector - Tinder-Style Defect Detection System
+# Defect Inspector - Professional Image Processing System
 
-A modern, web-based visual inspection system that uses a Tinder-like swipe interface for rapid defect detection and quality assurance. The system divides images into a 3x3 grid and analyzes each section independently against a master template using advanced image processing algorithms.
+A modern, web-based visual inspection system for professional defect detection and quality assurance. The system divides images into a 3x3 grid and analyzes each section independently against a master template using advanced image processing algorithms.
 
 ## Features
 
-- **Tinder-Style Interface**: Intuitive swipe-based defect inspection workflow
+- **Professional Inspection Interface**: Intuitive button-based defect inspection workflow
 - **9-Part Grid Analysis**: Divides test images into 3x3 grid sections for detailed comparison
 - **Dual-Stage Detection**: SSIM pre-check followed by pixel-level matching analysis
 - **Real-Time Feedback**: Instant visual feedback on defect locations and confidence scores
@@ -12,6 +12,8 @@ A modern, web-based visual inspection system that uses a Tinder-like swipe inter
 - **Template Management**: Admin panel for uploading and managing golden master images
 - **Authentication**: Secure user authentication with Supabase
 - **Dark Modern UI**: Professional dark theme with intuitive navigation
+- **Inspection Notes**: Add detailed notes to each inspection decision
+- **Image Navigation**: Browse through inspection queue with previous/next controls
 
 ## Architecture
 
@@ -38,8 +40,9 @@ A modern, web-based visual inspection system that uses a Tinder-like swipe inter
 project/
 ├── src/
 │   ├── components/
-│   │   ├── InspectionCard.tsx    # Main swipe interface
+│   │   ├── InspectionCard.tsx    # Main inspection interface
 │   │   ├── Dashboard.tsx         # Analytics dashboard
+│   │   ├── DefectViewer.tsx      # Detailed defect viewer
 │   │   └── AdminPanel.tsx        # Template management
 │   ├── lib/
 │   │   └── supabase.ts          # Supabase client setup
@@ -49,9 +52,9 @@ project/
 │   ├── App.css                  # App styling
 │   ├── index.css                # Global styles
 │   └── main.tsx                 # React entry point
-├── Modular_inspection/           # Python image processing
+├── modular_inspection_integrated/ # Python image processing
 │   ├── grid_analyzer.py         # 9-part grid analysis
-│   ├── align_revamp.py          # Image alignment (ORB)
+│   ├── align.py                 # Image alignment (ORB)
 │   ├── ssim.py                  # SSIM calculation
 │   ├── pixel_match.py           # Pixel matching
 │   └── ...
@@ -81,7 +84,7 @@ project/
    - Anomaly detection per segment
 
 4. **defect_records** - User inspection decisions
-   - Swipe decisions (accept/reject/review_later)
+   - Inspection decisions (accept/reject/review_later)
    - User notes and confidence overrides
    - Audit trail of inspection actions
 
@@ -119,10 +122,11 @@ project/
    - Show confidence scores and metrics
 
 6. **User Decision**
-   - User swipes to make decision:
-     - Swipe Right → Accept (no defect)
-     - Swipe Left → Reject (has defect)
-     - Swipe Up → Review Later
+   - User reviews results and makes decision:
+     - Accept (no defect)
+     - Reject (has defect)
+     - Review Later (needs additional review)
+   - Optional notes can be added to each decision
 
 ### Grid Analysis
 
@@ -177,9 +181,12 @@ npm run build
 
 1. **Login**: Sign in with your Supabase credentials
 2. **Inspect**: Click "Inspect" to start reviewing images
-3. **Swipe**: Use mouse drag or touch swipe to make decisions
-4. **View History**: Click "History" to see past decisions
-5. **Check Analytics**: Click "Dashboard" for quality metrics
+3. **Navigate**: Use Previous/Next buttons to move through the queue
+4. **Review Analysis**: Examine the automated analysis results and grid visualization
+5. **Add Notes**: Optionally add notes about specific defects or observations
+6. **Make Decision**: Click Accept, Reject, or Review Later
+7. **View History**: Click "History" to see past decisions
+8. **Check Analytics**: Click "Dashboard" for quality metrics
 
 ### For Administrators
 
@@ -230,10 +237,10 @@ Returns:
 
 ## Performance
 
-- **Frontend Build**: 330KB (gzip: 94KB)
-- **CSS**: 18KB (gzip: 3.8KB)
-- **Build Time**: ~4 seconds
+- **Frontend Build**: Optimized production builds
+- **Build Time**: Fast development and production builds
 - **Image Processing**: Fast SSIM pre-check followed by detailed analysis
+- **Responsive Design**: Works on desktop and tablet devices
 
 ## Configuration
 
@@ -288,7 +295,7 @@ To extend or modify this system:
 1. Add new components in `src/components/`
 2. Update types in `src/types/index.ts`
 3. Create new Edge Functions in `supabase/functions/`
-4. Extend Python processing in `Modular_inspection/`
+4. Extend Python processing in `modular_inspection_integrated/`
 5. Run tests and build validation
 
 ## Support
