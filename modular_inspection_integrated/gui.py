@@ -18,6 +18,8 @@ import os
 import sys
 import time
 import csv
+import shutil
+import json
 from PIL import Image, ImageTk
 
 # Import from integrated package
@@ -179,6 +181,10 @@ class InspectorApp(tk.Tk):
         self.template_grid_rows = 4
         self.template_search_margin = 50
         
+        # Window management - track all open tool windows
+        self.tool_windows = {}  # {window_name: window_instance}
+        self.session_file = "inspector_session.json"
+        
         # Log file
         self.log_file = "inspection_log.csv"
         self._init_log_file()
@@ -187,6 +193,10 @@ class InspectorApp(tk.Tk):
         self._setup_styles()
         self._build_ui()
         self._build_menu_bar()
+        
+        # Handle close and load session
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(500, self._load_session)  # Load session after UI settles
     
     def _build_menu_bar(self):
         """Build the menu bar with Tools menu."""
@@ -196,25 +206,302 @@ class InspectorApp(tk.Tk):
         # Tools menu
         tools_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Tools", menu=tools_menu)
-        tools_menu.add_command(label="QR Code Extractor", command=self._open_qr_cropper)
-        tools_menu.add_command(label="Gold Pad Extractor", command=self._open_gold_pad_extractor)
+        tools_menu.add_command(label="🔲 QR Code Extractor", command=self._open_qr_cropper)
+        tools_menu.add_command(label="🔶 Gold Pad Extractor", command=self._open_gold_pad_extractor)
+        tools_menu.add_command(label="🔴 Red Pad Extractor", command=self._open_red_pad_extractor)
+        tools_menu.add_command(label="🔍 Simple Defect Detection", command=self._open_simple_defect_detection)
         tools_menu.add_separator()
-        tools_menu.add_command(label="Open Log File", command=self._open_log_file)
+        tools_menu.add_command(label="📦 Batch Inspection", command=self._run_batch_inspection)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="📄 Open Log File", command=self._open_log_file)
         
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="About", command=self._show_about)
     
+    def _open_tool_window(self, name: str, WindowClass):
+        """Open or focus a tool window (singleton pattern)."""
+        # Check if window already exists
+        if name in self.tool_windows:
+            win = self.tool_windows[name]
+            if win.winfo_exists():
+                win.deiconify()
+                win.lift()
+                win.focus_force()
+                return win
+            else:
+                del self.tool_windows[name]
+        
+        # Create new window
+        win = WindowClass(self)
+        self.tool_windows[name] = win
+        
+        # Hook into window close event to manage app lifecycle
+        win.protocol("WM_DELETE_WINDOW", lambda: self._on_tool_close(name))
+        
+        return win
+    
+    def _on_tool_close(self, name):
+        """Handle tool window closure."""
+        if name in self.tool_windows:
+            win = self.tool_windows[name]
+            # Save geometry before destroying
+            self.tool_windows[name].geometry_saved = win.geometry()
+            win.destroy()
+            del self.tool_windows[name]
+        
+        # Check if we should exit the app (if main is hidden and no tools left)
+        self._check_exit_condition()
+
+    def _on_close(self):
+        """Handle application closure."""
+        self._save_session()
+        
+        # If tool windows are open, just hide the main window (don't exit)
+        if self.tool_windows:
+            self.withdraw()  # Hide main window
+        else:
+            self.destroy()
+            sys.exit(0)
+            
+    def _check_exit_condition(self):
+        """Exit app if main window is hidden and no tool windows are open."""
+        # If main window is hidden (not visible) AND no tool windows are open
+        if self.state() == 'withdrawn' or not self.winfo_viewable():
+            if not self.tool_windows:
+                self.destroy()
+                sys.exit(0)
+
+    def _show_home(self):
+        """Show the main inspector window."""
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def _save_session(self):
+        """Save current window state to session file."""
+        session_data = {
+            "main_geometry": self.geometry(),
+            "tools": {}
+        }
+        
+        for name, win in self.tool_windows.items():
+            if win.winfo_exists():
+                session_data["tools"][name] = {
+                    "geometry": win.geometry()
+                }
+        
+        try:
+            with open(self.session_file, 'w') as f:
+                json.dump(session_data, f)
+        except Exception as e:
+            print(f"Error saving session: {e}")
+            
+    def _load_session(self):
+        """Restore window state from session file."""
+        if not os.path.exists(self.session_file):
+            return
+            
+        try:
+            with open(self.session_file, 'r') as f:
+                data = json.load(f)
+            
+            if "main_geometry" in data:
+                self.geometry(data["main_geometry"])
+            
+            if "tools" in data:
+                for name, info in data["tools"].items():
+                    if name == "QR Extractor":
+                        self._open_qr_cropper()
+                    elif name == "Gold Pad":
+                        self._open_gold_pad_extractor()
+                    elif name == "Red Pad":
+                        self._open_red_pad_extractor()
+                    elif name == "Defect Detection":
+                        self._open_simple_defect_detection()
+                    
+                    if name in self.tool_windows:
+                        win = self.tool_windows[name]
+                        if "geometry" in info:
+                            win.geometry(info["geometry"])
+                        
+        except Exception as e:
+            print(f"Error loading session: {e}")
+
     def _open_qr_cropper(self):
-        """Open the QR Code Extractor window."""
-        qr_window = QRCropperWindow(self)
-        qr_window.focus_set()
+        """Open QR Code Extractor in a new window."""
+        self._open_tool_window("QR Extractor", QRCropperWindow)
     
     def _open_gold_pad_extractor(self):
-        """Open the Gold Pad Extractor window."""
-        gold_window = GoldPadExtractorWindow(self)
-        gold_window.focus_set()
+        """Open Gold Pad Extractor in a new window."""
+        self._open_tool_window("Gold Pad", GoldPadExtractorWindow)
+    
+    def _open_red_pad_extractor(self):
+        """Open Red Pad Extractor in a new window."""
+        self._open_tool_window("Red Pad", RedPadExtractorWindow)
+    
+    def _open_simple_defect_detection(self):
+        """Open Simple Defect Detection in a new window."""
+        self._open_tool_window("Defect Detection", SimpleDefectDetectionWindow)
+    
+    def _run_batch_inspection(self):
+        """Run batch inspection on a folder of images."""
+        # Select input folder
+        input_folder = filedialog.askdirectory(title="Select Input Folder (Reference/Test Pairs)")
+        if not input_folder:
+            return
+        
+        # Select output folder
+        output_folder = filedialog.askdirectory(title="Select Output Folder")
+        if not output_folder:
+            output_folder = os.path.join(input_folder, "Inspection_Results")
+        
+        # Find all test images (matching *_test* pattern or similar)
+        import glob
+        supported_exts = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+        all_images = []
+        for ext in supported_exts:
+            all_images.extend(glob.glob(os.path.join(input_folder, f"*{ext}")))
+            all_images.extend(glob.glob(os.path.join(input_folder, f"*{ext.upper()}")))
+        
+        if not all_images:
+            messagebox.showwarning("No Images", "No image files found in the selected folder.")
+            return
+        
+        # Create output folders
+        out_ok = os.path.join(output_folder, "OK")
+        out_defect = os.path.join(output_folder, "DEFECT")
+        out_error = os.path.join(output_folder, "ERROR")
+        os.makedirs(out_ok, exist_ok=True)
+        os.makedirs(out_defect, exist_ok=True)
+        os.makedirs(out_error, exist_ok=True)
+        
+        # Get current settings
+        align_method = self.align_method_var.get()
+        light_mode = self.light_mode_var.get()
+        inspect_mode = self.inspect_mode_var.get()
+        ssim_thresh = float(self.ssim_var.get())
+        pixel_thresh = float(self.pixel_threshold_var.get())
+        noise_filter = int(self.noise_var.get())
+        
+        results = []
+        total = len(all_images)
+        ok_count = 0
+        defect_count = 0
+        error_count = 0
+        
+        # Progress window
+        progress_win = tk.Toplevel(self)
+        progress_win.title("Batch Inspection Progress")
+        progress_win.geometry("400x150")
+        progress_win.configure(bg=self.BG_COLOR)
+        
+        progress_label = tk.Label(progress_win, text="Starting...", 
+                                  bg=self.BG_COLOR, fg=self.FG_COLOR,
+                                  font=(self.FONT_FACE, 10))
+        progress_label.pack(pady=20)
+        
+        progress_bar = ttk.Progressbar(progress_win, length=300, mode='determinate')
+        progress_bar.pack(pady=10)
+        
+        for i, test_path in enumerate(all_images, start=1):
+            progress_label.config(text=f"Processing {i}/{total}: {os.path.basename(test_path)}")
+            progress_bar['value'] = (i / total) * 100
+            progress_win.update()
+            
+            try:
+                # Read test image
+                from .io import read_image
+                test_img = read_image(test_path)
+                
+                # Get reference image path (assume same name in "reference" subfolder or use currently loaded)
+                ref_path = test_path.replace("test", "reference").replace("Test", "Reference")
+                if os.path.exists(ref_path):
+                    ref_img = read_image(ref_path)
+                elif self.ref_image is not None:
+                    ref_img = self.ref_image
+                else:
+                    # Use the first reference if available
+                    ref_candidates = glob.glob(os.path.join(input_folder, "*ref*"))
+                    if ref_candidates:
+                        ref_img = read_image(ref_candidates[0])
+                    else:
+                        raise ValueError("No reference image found")
+                
+                # Run inspection pipeline
+                from .align import align_images
+                from .inspection import run_inspection
+                
+                aligned_test, _, _ = align_images(ref_img, test_img, method=align_method)
+                
+                result = run_inspection(
+                    ref_img, aligned_test,
+                    light_sensitivity=light_mode,
+                    match_mode=inspect_mode,
+                    ssim_threshold=ssim_thresh,
+                    pixel_threshold=pixel_thresh,
+                    noise_filter_size=noise_filter,
+                    gold_focus=self.gold_focus_var.get() if hasattr(self, 'gold_focus_var') else False
+                )
+                
+                verdict = result.get('verdict', 'UNKNOWN')
+                
+                if verdict == 'OK':
+                    ok_count += 1
+                    save_dir = out_ok
+                else:
+                    defect_count += 1
+                    save_dir = out_defect
+                
+                # Save result image
+                base = os.path.splitext(os.path.basename(test_path))[0]
+                result_path = os.path.join(save_dir, f"{base}_result.png")
+                if result.get('diff_image') is not None:
+                    cv2.imwrite(result_path, result['diff_image'])
+                
+                results.append({
+                    'path': test_path,
+                    'verdict': verdict,
+                    'ssim': result.get('ssim', 0),
+                    'diff_pct': result.get('diff_percentage', 0),
+                    'reason': result.get('verdict_reason', '')
+                })
+                
+            except Exception as e:
+                error_count += 1
+                results.append({'path': test_path, 'verdict': 'ERROR', 'error': str(e)})
+                shutil.copy(test_path, out_error) if os.path.exists(test_path) else None
+        
+        progress_win.destroy()
+        
+        # Write summary report
+        from datetime import datetime
+        summary_path = os.path.join(output_folder, f"batch_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+        with open(summary_path, 'w') as f:
+            f.write("BATCH INSPECTION SUMMARY\n")
+            f.write("=" * 50 + "\n\n")
+            f.write(f"Total Images: {total}\n")
+            f.write(f"OK: {ok_count}\n")
+            f.write(f"DEFECT: {defect_count}\n")
+            f.write(f"ERROR: {error_count}\n\n")
+            f.write("Settings:\n")
+            f.write(f"  Alignment: {align_method}\n")
+            f.write(f"  Light Mode: {light_mode}\n")
+            f.write(f"  Inspect Mode: {inspect_mode}\n")
+            f.write(f"  SSIM Threshold: {ssim_thresh}\n")
+            f.write(f"  Pixel Threshold: {pixel_thresh}\n\n")
+            f.write("Results:\n")
+            for r in results:
+                f.write(f"  {os.path.basename(r['path'])}: {r['verdict']}\n")
+        
+        messagebox.showinfo("Batch Complete",
+            f"Batch inspection complete!\n\n"
+            f"Total: {total}\n"
+            f"OK: {ok_count}\n"
+            f"DEFECT: {defect_count}\n"
+            f"ERROR: {error_count}\n\n"
+            f"Results saved to:\n{output_folder}")
     
     def _open_log_file(self):
         """Open the log file location."""
@@ -263,19 +550,19 @@ Combined from Modular_inspection_1 + modular_inspection2
     
     def _build_ui(self):
         """Build the main UI layout."""
-        # Main container
-        main_frame = ttk.Frame(self)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Main container with controls on left
+        outer_frame = ttk.Frame(self)
+        outer_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Left panel - Controls (fixed, not scrollable)
-        controls_frame = tk.Frame(main_frame, bg=self.BG_COLOR, width=320)
+        controls_frame = tk.Frame(outer_frame, bg=self.BG_COLOR, width=320)
         controls_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
         controls_frame.pack_propagate(False)
         
         self._build_controls(controls_frame)
         
-        # Right panel - Scrollable Image displays
-        display_container = tk.Frame(main_frame, bg=self.BG_COLOR)
+        # Right side: Scrollable display area
+        display_container = tk.Frame(outer_frame, bg=self.BG_COLOR)
         display_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         # Create canvas for scrolling the display area
@@ -1091,6 +1378,7 @@ class QRCropperWindow(tk.Toplevel):
     
     def __init__(self, parent):
         super().__init__(parent)
+        self.parent = parent
         
         self.title("QR Code Extractor")
         self.geometry("1000x700")
@@ -1103,7 +1391,41 @@ class QRCropperWindow(tk.Toplevel):
         self.current_image = None
         self.last_results = []
         
+        self._build_menu()
         self._build_ui()
+    
+    def _build_menu(self):
+        """Build menu bar with navigation."""
+        menubar = tk.Menu(self)
+        self.config(menu=menubar)
+        
+        # Navigate menu
+        nav_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Navigate", menu=nav_menu)
+        nav_menu.add_command(label="🏠 Home (Inspector)", command=self._go_home)
+        nav_menu.add_separator()
+        nav_menu.add_command(label="✕ Close Window", command=self.destroy)
+        
+        # Tools menu
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="🔲 QR Code Extractor", command=lambda: self.lift())
+        tools_menu.add_command(label="🔶 Gold Pad Extractor", command=lambda: self.parent._open_gold_pad_extractor())
+        tools_menu.add_command(label="🔴 Red Pad Extractor", command=lambda: self.parent._open_red_pad_extractor())
+        tools_menu.add_command(label="🔍 Simple Defect Detection", command=lambda: self.parent._open_simple_defect_detection())
+        tools_menu.add_separator()
+        tools_menu.add_command(label="📦 Batch Inspection", command=lambda: self.parent._run_batch_inspection())
+        tools_menu.add_separator()
+        tools_menu.add_command(label="📄 Open Log File", command=lambda: self.parent._open_log_file())
+    
+    def _go_home(self):
+        """Bring main Inspector window to front."""
+        if hasattr(self.parent, '_show_home'):
+            self.parent._show_home()
+        else:
+            self.parent.deiconify()
+            self.parent.lift()
+            self.parent.focus_force()
     
     def _build_ui(self):
         """Build the QR Cropper UI."""
@@ -1339,6 +1661,7 @@ class GoldPadExtractorWindow(tk.Toplevel):
     
     def __init__(self, parent):
         super().__init__(parent)
+        self.parent = parent
         
         self.title("Gold Pad Extractor")
         self.geometry("1200x800")
@@ -1362,7 +1685,36 @@ class GoldPadExtractorWindow(tk.Toplevel):
         self.max_radius = tk.IntVar(value=100)
         self.min_circularity = tk.DoubleVar(value=0.7)
         
+        self._build_menu()
         self._build_ui()
+    
+    def _build_menu(self):
+        """Build menu bar with navigation."""
+        menubar = tk.Menu(self)
+        self.config(menu=menubar)
+        
+        # Navigate menu
+        nav_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Navigate", menu=nav_menu)
+        nav_menu.add_command(label="🏠 Home (Inspector)", command=self._go_home)
+        nav_menu.add_separator()
+        nav_menu.add_command(label="✕ Close Window", command=self.destroy)
+        
+        # Tools menu
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="🔲 QR Code Extractor", command=lambda: self.parent._open_qr_cropper())
+        tools_menu.add_command(label="🔶 Gold Pad Extractor", command=lambda: self.lift())
+        tools_menu.add_command(label="🔴 Red Pad Extractor", command=lambda: self.parent._open_red_pad_extractor())
+        tools_menu.add_command(label="🔍 Simple Defect Detection", command=lambda: self.parent._open_simple_defect_detection())
+        tools_menu.add_separator()
+        tools_menu.add_command(label="📦 Batch Inspection", command=lambda: self.parent._run_batch_inspection())
+        tools_menu.add_separator()
+        tools_menu.add_command(label="📄 Open Log File", command=lambda: self.parent._open_log_file())
+    
+    def _go_home(self):
+        """Bring main Inspector window to front."""
+        self.parent._show_home()
     
     def _build_ui(self):
         """Build the Gold Pad Extractor UI."""
@@ -1624,7 +1976,7 @@ class GoldPadExtractorWindow(tk.Toplevel):
         self.status_var.set(f"Detected {len(self.detected_pads)} gold pads")
     
     def _extract_pads(self):
-        """Extract individual gold pad images."""
+        """Extract individual gold pad images (masked only, no white background)."""
         if self.current_image is None:
             messagebox.showwarning("No Image", "Please load an image first.")
             return
@@ -1656,24 +2008,18 @@ class GoldPadExtractorWindow(tk.Toplevel):
             # Extract region
             pad_image = self.current_image[y1:y2, x1:x2].copy()
             
-            # Create circular mask to remove background
+            # Create circular mask
             mask = np.zeros(pad_image.shape[:2], dtype=np.uint8)
             local_cx = cx - x1
             local_cy = cy - y1
             cv2.circle(mask, (local_cx, local_cy), r, 255, -1)
             
-            # Apply mask (make background transparent or white)
+            # Apply mask (transparent background)
             pad_masked = cv2.bitwise_and(pad_image, pad_image, mask=mask)
-            
-            # Create white background version
-            white_bg = np.ones_like(pad_image) * 255
-            white_bg = cv2.bitwise_and(white_bg, white_bg, mask=cv2.bitwise_not(mask))
-            pad_on_white = cv2.add(pad_masked, white_bg)
             
             self.extracted_pads.append({
                 'id': i + 1,
-                'image': pad_on_white,
-                'image_no_bg': pad_masked,
+                'image': pad_masked,  # Only masked version now
                 'center': (cx, cy),
                 'radius': r,
                 'mask': mask
@@ -1723,7 +2069,7 @@ class GoldPadExtractorWindow(tk.Toplevel):
             x_offset += new_w + 15
     
     def _save_pads(self):
-        """Save extracted gold pads to a folder."""
+        """Save extracted gold pads (masked only with transparency)."""
         if not self.extracted_pads:
             messagebox.showwarning("No Pads", "No extracted pads to save. Run extraction first.")
             return
@@ -1744,21 +2090,16 @@ class GoldPadExtractorWindow(tk.Toplevel):
             saved_files = []
             
             for pad in self.extracted_pads:
-                # Save with white background
+                # Save only masked version with transparency (RGBA)
                 filename = f"pad_{pad['id']:03d}.png"
                 filepath = os.path.join(pads_folder, filename)
-                cv2.imwrite(filepath, pad['image'])
-                saved_files.append(filename)
-                
-                # Also save circular crop (transparent background as alpha)
-                filename_alpha = f"pad_{pad['id']:03d}_masked.png"
-                filepath_alpha = os.path.join(pads_folder, filename_alpha)
                 
                 # Create RGBA image with transparency
-                b, g, r = cv2.split(pad['image_no_bg'])
+                b, g, r = cv2.split(pad['image'])
                 alpha = pad['mask']
                 rgba = cv2.merge([b, g, r, alpha])
-                cv2.imwrite(filepath_alpha, rgba)
+                cv2.imwrite(filepath, rgba)
+                saved_files.append(filename)
             
             # Save summary
             summary_path = os.path.join(pads_folder, "extraction_summary.txt")
@@ -1778,8 +2119,7 @@ class GoldPadExtractorWindow(tk.Toplevel):
                 f"Saved {len(self.extracted_pads)} gold pads!\n\n"
                 f"Location: {pads_folder}\n\n"
                 f"Each pad saved as:\n"
-                f"• pad_XXX.png (white background)\n"
-                f"• pad_XXX_masked.png (transparent background)")
+                f"• pad_XXX.png (transparent background)")
                 
         except Exception as e:
             self.status_var.set(f"Error: {str(e)}")
@@ -1810,8 +2150,2508 @@ class GoldPadExtractorWindow(tk.Toplevel):
 
 
 # ==============================================================================
+# RED PAD EXTRACTOR WINDOW
+# ==============================================================================
+
+class RedPadExtractorWindow(tk.Toplevel):
+    """Red Pad Extraction Tool - Extract red circles from PCB strips using HSV filtering.
+    
+    Red in HSV wraps around 0, so we use two ranges: 0-10 and 160-179.
+    Output files are saved with '_red_padding' suffix.
+    """
+    
+    BG_COLOR = "#000000"
+    FG_COLOR = "#FF4444"  # Red color
+    ACCENT_COLOR = "#FF4444"
+    FONT_FACE = "Consolas"
+    
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        
+        self.title("Red Pad Extractor")
+        self.geometry("1200x800")
+        self.configure(bg=self.BG_COLOR)
+        
+        self.current_image = None
+        self.detected_pads = []
+        self.extracted_pads = []
+        self.preview_image = None
+        
+        # Default HSV range for red (two ranges: 0-10 and 160-179)
+        self.hue_low1 = tk.IntVar(value=0)
+        self.hue_high1 = tk.IntVar(value=10)
+        self.hue_low2 = tk.IntVar(value=160)
+        self.hue_high2 = tk.IntVar(value=179)
+        self.sat_low = tk.IntVar(value=70)
+        self.sat_high = tk.IntVar(value=255)
+        self.val_low = tk.IntVar(value=50)
+        self.val_high = tk.IntVar(value=255)
+        
+        # Circle detection params
+        self.min_radius = tk.IntVar(value=20)
+        self.max_radius = tk.IntVar(value=100)
+        self.min_circularity = tk.DoubleVar(value=0.7)
+        
+        self._build_menu()
+        self._build_ui()
+    
+    def _build_menu(self):
+        """Build menu bar with navigation."""
+        menubar = tk.Menu(self)
+        self.config(menu=menubar)
+        
+        # Navigate menu
+        nav_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Navigate", menu=nav_menu)
+        nav_menu.add_command(label="🏠 Home (Inspector)", command=self._go_home)
+        nav_menu.add_separator()
+        nav_menu.add_command(label="✕ Close Window", command=self.destroy)
+        
+        # Tools menu
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="🔲 QR Code Extractor", command=lambda: self.parent._open_qr_cropper())
+        tools_menu.add_command(label="🔶 Gold Pad Extractor", command=lambda: self.parent._open_gold_pad_extractor())
+        tools_menu.add_command(label="🔴 Red Pad Extractor", command=lambda: self.lift())
+        tools_menu.add_command(label="🔍 Simple Defect Detection", command=lambda: self.parent._open_simple_defect_detection())
+        tools_menu.add_separator()
+        tools_menu.add_command(label="📦 Batch Inspection", command=lambda: self.parent._run_batch_inspection())
+        tools_menu.add_separator()
+        tools_menu.add_command(label="📄 Open Log File", command=lambda: self.parent._open_log_file())
+    
+    def _go_home(self):
+        """Bring main Inspector window to front."""
+        self.parent.lift()
+        self.parent.focus_force()
+    
+    def _build_ui(self):
+        """Build the Red Pad Extractor UI."""
+        main_frame = tk.Frame(self, bg=self.BG_COLOR)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Left panel - Controls
+        controls_frame = tk.Frame(main_frame, bg=self.BG_COLOR, width=320)
+        controls_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        controls_frame.pack_propagate(False)
+        
+        # Title
+        title_label = tk.Label(controls_frame, text="[ RED PAD EXTRACTOR ]",
+                              font=(self.FONT_FACE, 14, 'bold'),
+                              bg=self.BG_COLOR, fg=self.ACCENT_COLOR)
+        title_label.pack(pady=10)
+        
+        # Load button
+        load_frame = tk.Frame(controls_frame, bg=self.BG_COLOR,
+                             highlightbackground=self.FG_COLOR, highlightthickness=1)
+        load_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Button(load_frame, text="Load Image",
+                  command=self._load_image).pack(fill=tk.X, padx=5, pady=5)
+        
+        self.image_status = ttk.Label(load_frame, text="No image loaded", 
+                                      foreground="#888888")
+        self.image_status.pack(pady=(0, 5))
+        
+        # HSV Settings - Red has TWO hue ranges
+        hsv_frame = tk.Frame(controls_frame, bg=self.BG_COLOR,
+                            highlightbackground=self.FG_COLOR, highlightthickness=1)
+        hsv_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(hsv_frame, text="< HSV RED FILTER >", foreground=self.ACCENT_COLOR).pack(pady=5)
+        ttk.Label(hsv_frame, text="(Red uses dual hue ranges)", foreground="#888888").pack()
+        
+        # Hue range 1 (0-10)
+        ttk.Label(hsv_frame, text="--- Range 1 ---", foreground="#AAAAAA").pack(pady=2)
+        self._add_slider(hsv_frame, "Hue1 Low:", self.hue_low1, 0, 30)
+        self._add_slider(hsv_frame, "Hue1 High:", self.hue_high1, 0, 30)
+        
+        # Hue range 2 (160-179)
+        ttk.Label(hsv_frame, text="--- Range 2 ---", foreground="#AAAAAA").pack(pady=2)
+        self._add_slider(hsv_frame, "Hue2 Low:", self.hue_low2, 150, 179)
+        self._add_slider(hsv_frame, "Hue2 High:", self.hue_high2, 150, 179)
+        
+        # Saturation and Value
+        ttk.Label(hsv_frame, text="--- Sat/Val ---", foreground="#AAAAAA").pack(pady=2)
+        self._add_slider(hsv_frame, "Sat Low:", self.sat_low, 0, 255)
+        self._add_slider(hsv_frame, "Sat High:", self.sat_high, 0, 255)
+        self._add_slider(hsv_frame, "Val Low:", self.val_low, 0, 255)
+        self._add_slider(hsv_frame, "Val High:", self.val_high, 0, 255)
+        
+        # Circle detection settings
+        circle_frame = tk.Frame(controls_frame, bg=self.BG_COLOR,
+                               highlightbackground=self.FG_COLOR, highlightthickness=1)
+        circle_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(circle_frame, text="< CIRCLE DETECTION >", foreground=self.ACCENT_COLOR).pack(pady=5)
+        
+        self._add_slider(circle_frame, "Min Radius:", self.min_radius, 5, 200)
+        self._add_slider(circle_frame, "Max Radius:", self.max_radius, 10, 300)
+        
+        # Action buttons
+        action_frame = tk.Frame(controls_frame, bg=self.BG_COLOR)
+        action_frame.pack(fill=tk.X, padx=5, pady=10)
+        
+        preview_btn = tk.Button(action_frame, text="👁 PREVIEW DETECTION",
+                               font=(self.FONT_FACE, 11, 'bold'),
+                               bg="#440000", fg="#FF8888",
+                               command=self._preview_detection)
+        preview_btn.pack(fill=tk.X, pady=3)
+        
+        extract_btn = tk.Button(action_frame, text="⭕ EXTRACT RED PADS",
+                               font=(self.FONT_FACE, 11, 'bold'),
+                               bg="#440000", fg=self.FG_COLOR,
+                               command=self._extract_pads)
+        extract_btn.pack(fill=tk.X, pady=3)
+        
+        save_btn = tk.Button(action_frame, text="💾 SAVE EXTRACTED PADS",
+                            font=(self.FONT_FACE, 11, 'bold'),
+                            bg="#440044", fg="#FF88FF",
+                            command=self._save_pads)
+        save_btn.pack(fill=tk.X, pady=3)
+        
+        # Results
+        result_frame = tk.Frame(controls_frame, bg=self.BG_COLOR,
+                               highlightbackground=self.FG_COLOR, highlightthickness=1)
+        result_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        ttk.Label(result_frame, text="< RESULTS >", foreground=self.ACCENT_COLOR).pack(pady=5)
+        
+        self.results_text = tk.Text(result_frame, bg="#111111", fg=self.FG_COLOR,
+                                   font=(self.FONT_FACE, 9), height=8, width=30)
+        self.results_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Right panel - Image displays
+        display_frame = tk.Frame(main_frame, bg=self.BG_COLOR)
+        display_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Original/Preview
+        preview_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
+        preview_frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(preview_frame, text="PREVIEW (Red Mask / Detection)").pack()
+        self.preview_label = tk.Label(preview_frame, bg="#111111")
+        self.preview_label.pack(fill=tk.BOTH, expand=True)
+        
+        # Extracted pads gallery
+        gallery_frame = tk.Frame(display_frame, bg=self.BG_COLOR, height=200)
+        gallery_frame.pack(fill=tk.X, pady=10)
+        gallery_frame.pack_propagate(False)
+        
+        ttk.Label(gallery_frame, text="EXTRACTED RED PADS").pack()
+        
+        self.gallery_canvas = tk.Canvas(gallery_frame, bg="#111111", height=150)
+        self.gallery_canvas.pack(fill=tk.X, expand=True)
+        
+        # Status bar
+        self.status_var = tk.StringVar(value="Ready - Load an image to extract red pads")
+        status_bar = tk.Label(self, textvariable=self.status_var,
+                             bg="#222222", fg=self.FG_COLOR,
+                             font=(self.FONT_FACE, 9), anchor=tk.W)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+    
+    def _add_slider(self, parent, label, variable, from_, to):
+        """Add a labeled slider."""
+        row = tk.Frame(parent, bg=self.BG_COLOR)
+        row.pack(fill=tk.X, padx=5, pady=1)
+        ttk.Label(row, text=label, width=10).pack(side=tk.LEFT)
+        slider = ttk.Scale(row, from_=from_, to=to, variable=variable, orient=tk.HORIZONTAL)
+        slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        value_label = ttk.Label(row, textvariable=variable, width=4)
+        value_label.pack(side=tk.LEFT)
+    
+    def _load_image(self):
+        """Load an image for red pad extraction."""
+        path = filedialog.askopenfilename(
+            title="Select Image",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff")]
+        )
+        if path:
+            try:
+                from .io import read_image
+                self.current_image = read_image(path)
+                self.image_status.config(text=os.path.basename(path), 
+                                        foreground=self.FG_COLOR)
+                self._display_image(self.current_image, self.preview_label)
+                self.status_var.set(f"Loaded: {os.path.basename(path)}")
+                self.results_text.delete(1.0, tk.END)
+                self.results_text.insert(tk.END, "Image loaded.\n\nClick 'PREVIEW DETECTION' to see red mask.\nAdjust HSV sliders if needed.\nThen click 'EXTRACT RED PADS'.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load image: {e}")
+    
+    def _get_red_mask(self, image):
+        """Create HSV mask for red regions (dual hue range)."""
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        # Range 1: low reds (0-10)
+        lower1 = np.array([self.hue_low1.get(), self.sat_low.get(), self.val_low.get()])
+        upper1 = np.array([self.hue_high1.get(), self.sat_high.get(), self.val_high.get()])
+        mask1 = cv2.inRange(hsv, lower1, upper1)
+        
+        # Range 2: high reds (160-179)
+        lower2 = np.array([self.hue_low2.get(), self.sat_low.get(), self.val_low.get()])
+        upper2 = np.array([self.hue_high2.get(), self.sat_high.get(), self.val_high.get()])
+        mask2 = cv2.inRange(hsv, lower2, upper2)
+        
+        # Combine both ranges
+        mask = cv2.bitwise_or(mask1, mask2)
+        
+        # Morphological cleanup
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        
+        return mask
+    
+    def _detect_circles(self, mask):
+        """Detect circular red pads from the mask."""
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        circles = []
+        min_r = self.min_radius.get()
+        max_r = self.max_radius.get()
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < 100:
+                continue
+            
+            (x, y), radius = cv2.minEnclosingCircle(contour)
+            
+            if min_r <= radius <= max_r:
+                perimeter = cv2.arcLength(contour, True)
+                if perimeter > 0:
+                    circularity = 4 * np.pi * area / (perimeter * perimeter)
+                    
+                    if circularity >= self.min_circularity.get():
+                        circles.append({
+                            'center': (int(x), int(y)),
+                            'radius': int(radius),
+                            'area': area,
+                            'circularity': circularity,
+                            'contour': contour
+                        })
+        
+        circles.sort(key=lambda c: (c['center'][1] // 50, c['center'][0]))
+        return circles
+    
+    def _preview_detection(self):
+        """Preview the red mask and detected circles."""
+        if self.current_image is None:
+            messagebox.showwarning("No Image", "Please load an image first.")
+            return
+        
+        self.status_var.set("Detecting red pads...")
+        self.update_idletasks()
+        
+        mask = self._get_red_mask(self.current_image)
+        self.detected_pads = self._detect_circles(mask)
+        
+        preview = self.current_image.copy()
+        
+        for i, pad in enumerate(self.detected_pads):
+            cx, cy = pad['center']
+            r = pad['radius']
+            cv2.circle(preview, (cx, cy), r, (0, 255, 0), 2)
+            cv2.circle(preview, (cx, cy), 3, (0, 255, 255), -1)
+            cv2.putText(preview, str(i+1), (cx-10, cy-r-5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        
+        # Side-by-side view
+        mask_colored = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        mask_colored[:, :, 2] = np.where(mask > 0, 200, 0)  # Red tint
+        mask_colored[:, :, 0] = np.where(mask > 0, 50, 0)
+        
+        h, w = preview.shape[:2]
+        combined = np.hstack([
+            cv2.resize(mask_colored, (w//2, h//2)),
+            cv2.resize(preview, (w//2, h//2))
+        ])
+        
+        self._display_image(combined, self.preview_label, size=(800, 500))
+        
+        self.results_text.delete(1.0, tk.END)
+        self.results_text.insert(tk.END, f"Found {len(self.detected_pads)} red pads:\n\n")
+        
+        for i, pad in enumerate(self.detected_pads):
+            self.results_text.insert(tk.END, 
+                f"#{i+1}: Center ({pad['center'][0]}, {pad['center'][1]})\n"
+                f"     Radius: {pad['radius']}px\n"
+                f"     Circularity: {pad['circularity']:.2f}\n\n")
+        
+        self.status_var.set(f"Detected {len(self.detected_pads)} red pads")
+    
+    def _extract_pads(self):
+        """Extract individual red pad images."""
+        if self.current_image is None:
+            messagebox.showwarning("No Image", "Please load an image first.")
+            return
+        
+        if not self.detected_pads:
+            self._preview_detection()
+            if not self.detected_pads:
+                messagebox.showinfo("No Pads", "No red pads detected. Adjust HSV settings.")
+                return
+        
+        self.status_var.set("Extracting red pads...")
+        self.update_idletasks()
+        
+        self.extracted_pads = []
+        h, w = self.current_image.shape[:2]
+        
+        for i, pad in enumerate(self.detected_pads):
+            cx, cy = pad['center']
+            r = pad['radius']
+            
+            padding = 5
+            x1 = max(0, cx - r - padding)
+            y1 = max(0, cy - r - padding)
+            x2 = min(w, cx + r + padding)
+            y2 = min(h, cy + r + padding)
+            
+            pad_image = self.current_image[y1:y2, x1:x2].copy()
+            
+            mask = np.zeros(pad_image.shape[:2], dtype=np.uint8)
+            local_cx = cx - x1
+            local_cy = cy - y1
+            cv2.circle(mask, (local_cx, local_cy), r, 255, -1)
+            
+            pad_masked = cv2.bitwise_and(pad_image, pad_image, mask=mask)
+            
+            white_bg = np.ones_like(pad_image) * 255
+            white_bg = cv2.bitwise_and(white_bg, white_bg, mask=cv2.bitwise_not(mask))
+            pad_on_white = cv2.add(pad_masked, white_bg)
+            
+            self.extracted_pads.append({
+                'id': i + 1,
+                'image': pad_on_white,
+                'image_no_bg': pad_masked,
+                'center': (cx, cy),
+                'radius': r,
+                'mask': mask
+            })
+        
+        self._update_gallery()
+        
+        self.results_text.insert(tk.END, f"\n=== EXTRACTED {len(self.extracted_pads)} PADS ===\n")
+        self.results_text.insert(tk.END, "Click 'SAVE EXTRACTED PADS' to save.\n")
+        
+        self.status_var.set(f"Extracted {len(self.extracted_pads)} red pads")
+    
+    def _update_gallery(self):
+        """Update the gallery canvas with extracted pads."""
+        self.gallery_canvas.delete("all")
+        
+        if not self.extracted_pads:
+            return
+        
+        x_offset = 10
+        thumb_size = 80
+        
+        for pad in self.extracted_pads[:15]:
+            img = pad['image']
+            
+            h, w = img.shape[:2]
+            scale = min(thumb_size/w, thumb_size/h)
+            new_w, new_h = int(w*scale), int(h*scale)
+            
+            thumb = cv2.resize(img, (new_w, new_h))
+            thumb_rgb = cv2.cvtColor(thumb, cv2.COLOR_BGR2RGB)
+            
+            photo = ImageTk.PhotoImage(image=Image.fromarray(thumb_rgb))
+            
+            self.gallery_canvas.create_image(x_offset, 10, anchor=tk.NW, image=photo)
+            self.gallery_canvas.create_text(x_offset + new_w//2, new_h + 20, 
+                                           text=f"#{pad['id']}", fill=self.FG_COLOR)
+            
+            if not hasattr(self, 'gallery_photos'):
+                self.gallery_photos = []
+            self.gallery_photos.append(photo)
+            
+            x_offset += new_w + 15
+    
+    def _save_pads(self):
+        """Save extracted red pads to a folder with _red_padding suffix."""
+        if not self.extracted_pads:
+            messagebox.showwarning("No Pads", "No extracted pads to save. Run extraction first.")
+            return
+        
+        output_dir = filedialog.askdirectory(title="Select Output Folder")
+        if not output_dir:
+            return
+        
+        try:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            pads_folder = os.path.join(output_dir, f"red_pads_{timestamp}")
+            os.makedirs(pads_folder, exist_ok=True)
+            
+            self.status_var.set("Saving extracted red pads...")
+            self.update_idletasks()
+            
+            saved_files = []
+            
+            for pad in self.extracted_pads:
+                # Save with white background - using _red_padding suffix
+                filename = f"pad_{pad['id']:03d}_red_padding.png"
+                filepath = os.path.join(pads_folder, filename)
+                cv2.imwrite(filepath, pad['image'])
+                saved_files.append(filename)
+                
+                # Also save circular crop (transparent background)
+                filename_alpha = f"pad_{pad['id']:03d}_red_padding_masked.png"
+                filepath_alpha = os.path.join(pads_folder, filename_alpha)
+                
+                b, g, r = cv2.split(pad['image_no_bg'])
+                alpha = pad['mask']
+                rgba = cv2.merge([b, g, r, alpha])
+                cv2.imwrite(filepath_alpha, rgba)
+            
+            # Save summary
+            summary_path = os.path.join(pads_folder, "extraction_summary.txt")
+            with open(summary_path, 'w') as f:
+                f.write("RED PAD EXTRACTION SUMMARY\n")
+                f.write("=" * 40 + "\n\n")
+                f.write(f"Total pads extracted: {len(self.extracted_pads)}\n")
+                f.write(f"Hue Range 1: {self.hue_low1.get()}-{self.hue_high1.get()}\n")
+                f.write(f"Hue Range 2: {self.hue_low2.get()}-{self.hue_high2.get()}\n")
+                f.write(f"Saturation: {self.sat_low.get()}-{self.sat_high.get()}\n")
+                f.write(f"Value: {self.val_low.get()}-{self.val_high.get()}\n\n")
+                
+                for pad in self.extracted_pads:
+                    f.write(f"Pad #{pad['id']}: Center ({pad['center'][0]}, {pad['center'][1]}), R={pad['radius']}px\n")
+            
+            self.status_var.set(f"Saved {len(saved_files)} red pads to: {pads_folder}")
+            messagebox.showinfo("Saved", 
+                f"Saved {len(self.extracted_pads)} red pads!\n\n"
+                f"Location: {pads_folder}\n\n"
+                f"Each pad saved as:\n"
+                f"• pad_XXX_red_padding.png (white background)\n"
+                f"• pad_XXX_red_padding_masked.png (transparent)")
+                
+        except Exception as e:
+            self.status_var.set(f"Error: {str(e)}")
+            messagebox.showerror("Save Error", str(e))
+    
+    def _display_image(self, cv2_image: np.ndarray, label: tk.Label, size=(600, 400)):
+        """Display image in the label."""
+        if cv2_image is None or cv2_image.size == 0:
+            return
+        
+        h, w = cv2_image.shape[:2]
+        ratio = min(size[0]/w, size[1]/h)
+        new_w, new_h = int(w * ratio), int(h * ratio)
+        
+        if new_w == 0 or new_h == 0:
+            return
+        
+        img_resized = cv2.resize(cv2_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+        if len(img_resized.shape) == 2:
+            img_resized = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2BGR)
+        
+        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        photo = ImageTk.PhotoImage(image=Image.fromarray(img_rgb))
+        
+        label.config(image=photo)
+        label.image = photo
+
+
+# ==============================================================================
+# PRESET CONFIGURATION WINDOW
+# ==============================================================================
+
+class PresetConfigWindow(tk.Toplevel):
+    """Popup window to configure defect presets."""
+    
+    def __init__(self, parent, presets, on_save_callback):
+        super().__init__(parent)
+        self.title("Configure Defect Presets")
+        self.geometry("450x500")
+        self.transient(parent)
+        self.grab_set()
+        
+        self.parent = parent
+        self.presets = presets.copy() # Work on a copy
+        self.on_save = on_save_callback
+        
+        # Style
+        self.configure(bg="#1e1e1e")
+        self.ACCENT = "#00FFFF"
+        
+        # Variables
+        self.current_preset = tk.StringVar(value="Scratches")
+        self.sigma = tk.DoubleVar()
+        self.thresh = tk.DoubleVar()
+        self.block = tk.IntVar()
+        self.c_val = tk.IntVar()
+        
+        self._build_ui()
+        self._load_preset_values()
+        
+    def _build_ui(self):
+        # Header
+        tk.Label(self, text="Customize Preset Definitions", bg="#1e1e1e", fg=self.ACCENT,
+                font=("Segoe UI", 12, "bold")).pack(pady=10)
+        
+        # Preset Selector
+        sel_frame = tk.Frame(self, bg="#1e1e1e")
+        sel_frame.pack(fill=tk.X, padx=20, pady=5)
+        
+        tk.Label(sel_frame, text="Select Preset to Edit:", bg="#1e1e1e", fg="white").pack(anchor=tk.W)
+        
+        # Exclude 'Custom' from being editable defined presets
+        editable_presets = [k for k in self.presets.keys() if k != "Custom"]
+        self.combo = ttk.Combobox(sel_frame, textvariable=self.current_preset, 
+                                 values=editable_presets, state="readonly")
+        self.combo.pack(fill=tk.X, pady=5)
+        self.combo.bind("<<ComboboxSelected>>", self._load_preset_values)
+        
+        # Sliders Frame
+        controls_frame = tk.LabelFrame(self, text="Parameters", bg="#1e1e1e", fg="#aaaaaa")
+        controls_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        # Sigma
+        self._add_slider(controls_frame, "Sigma (Blur)", self.sigma, 0.0, 5.0, 0.1)
+        
+        # Threshold
+        self._add_slider(controls_frame, "Threshold (Global)", self.thresh, 0.0, 1.0, 0.05)
+        
+        # Block Size
+        self._add_slider(controls_frame, "Block Size (Adaptive)", self.block, 3, 51, 2)
+        
+        # C Constant
+        self._add_slider(controls_frame, "C Constant (Adaptive)", self.c_val, -10, 20, 1)
+        
+        # Buttons
+        btn_frame = tk.Frame(self, bg="#1e1e1e")
+        btn_frame.pack(fill=tk.X, padx=20, pady=20)
+        
+        ttk.Button(btn_frame, text="Save Changes", command=self._save).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="Reset to Defaults", command=self._reset_defaults).pack(side=tk.LEFT)
+
+    def _add_slider(self, parent, label, variable, min_val, max_val, step):
+        frame = tk.Frame(parent, bg="#1e1e1e")
+        frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        lbl_frame = tk.Frame(frame, bg="#1e1e1e")
+        lbl_frame.pack(fill=tk.X)
+        tk.Label(lbl_frame, text=label, bg="#1e1e1e", fg="#dddddd").pack(side=tk.LEFT)
+        val_lbl = tk.Label(lbl_frame, textvariable=variable, bg="#1e1e1e", fg=self.ACCENT)
+        val_lbl.pack(side=tk.RIGHT)
+        
+        s = ttk.Scale(frame, from_=min_val, to=max_val, variable=variable)
+        s.pack(fill=tk.X)
+        
+        # Enforce step/odd logic if needed
+        if variable == self.block:
+            s.configure(command=lambda v: self._snap_odd(v, variable))
+        
+    def _snap_odd(self, val, var):
+        v = int(float(val))
+        if v % 2 == 0: v += 1
+        var.set(v)
+        
+    def _load_preset_values(self, event=None):
+        name = self.current_preset.get()
+        if name in self.presets:
+            p = self.presets[name]
+            self.sigma.set(p["sigma"])
+            self.thresh.set(p["thresh"])
+            self.block.set(p["block"])
+            self.c_val.set(p["c"])
+            
+    def _save(self):
+        # Update current working copy
+        name = self.current_preset.get()
+        self.presets[name] = {
+            "sigma": round(self.sigma.get(), 2),
+            "thresh": round(self.thresh.get(), 2),
+            "block": int(self.block.get()),
+            "c": int(self.c_val.get())
+        }
+        # Pass back to parent
+        self.on_save(self.presets)
+        self.destroy()
+        
+    def _reset_defaults(self):
+        # Reset current preset hardcoded defaults (simplified for now)
+        from tkinter import messagebox
+        if messagebox.askyesno("Reset", "Reset this preset to original factory settings?"):
+            # Need access to original factory defaults. 
+            # Ideally passed in or static. For now, just a placeholder or minimal logic.
+            pass
+
+
+# ==============================================================================
+# SIMPLE DEFECT DETECTION WINDOW
+# ==============================================================================
+
+class SimpleDefectDetectionWindow(tk.Toplevel):
+    """Simple Defect Detection - Binary thresholding with Otsu auto-threshold for batch processing.
+    
+    Ported from pad_binary_gui.py with bulk processing support.
+    """
+    
+    BG_COLOR = "#000000"
+    FG_COLOR = "#00FFFF"  # Cyan
+    ACCENT_COLOR = "#00FFFF"
+    FONT_FACE = "Consolas"
+    
+    # Preset Definitions
+    DEFECT_PRESETS = {
+        "General":   {"sigma": 1.2, "thresh": 0.65, "block": 11, "c": 2},
+        "Scratches": {"sigma": 0.8, "thresh": 0.60, "block": 7,  "c": 2},
+        "Stains":    {"sigma": 2.0, "thresh": 0.70, "block": 25, "c": 4},
+        "Pinholes":  {"sigma": 0.8, "thresh": 0.60, "block": 9,  "c": 5}
+    }
+    
+    SUPPORTED_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".bitmap", ".dib")
+    
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        
+        self.title("Simple Defect Detection")
+        self.geometry("1300x850")
+        self.configure(bg=self.BG_COLOR)
+        
+        # State
+        self.input_folder = tk.StringVar(value="")
+        self.output_folder = tk.StringVar(value="")
+        self.sigma = tk.DoubleVar(value=1.2)
+        self.thresh = tk.DoubleVar(value=0.65)
+        self.use_otsu = tk.BooleanVar(value=True)  # Auto Otsu mode ON by default
+        self.use_adaptive = tk.BooleanVar(value=False)  # Adaptive thresholding
+        self.adaptive_block_size = tk.IntVar(value=11)  # Block size for adaptive
+        self.adaptive_c = tk.IntVar(value=2)  # C constant for adaptive
+        self.black_defect_pct = tk.DoubleVar(value=10.0)
+        
+        self.files = []
+        self.idx = 0
+        self.results = []  # Batch results
+        
+        self.current_image = None
+        self.current_alpha = None
+        self.current_bw = None
+        
+        self._build_menu()
+        self._build_ui()
+    
+    def _build_menu(self):
+        """Build menu bar with navigation."""
+        menubar = tk.Menu(self)
+        self.config(menu=menubar)
+        
+        # Navigate menu
+        nav_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Navigate", menu=nav_menu)
+        nav_menu.add_command(label="🏠 Home (Inspector)", command=self._go_home)
+        nav_menu.add_separator()
+        nav_menu.add_command(label="✕ Close Window", command=self.destroy)
+        
+        # Tools menu
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="🔲 QR Code Extractor", command=lambda: self.parent._open_qr_cropper())
+        tools_menu.add_command(label="🔶 Gold Pad Extractor", command=lambda: self.parent._open_gold_pad_extractor())
+        tools_menu.add_command(label="🔴 Red Pad Extractor", command=lambda: self.parent._open_red_pad_extractor())
+        tools_menu.add_command(label="🔍 Simple Defect Detection", command=lambda: self.lift())
+        tools_menu.add_separator()
+        tools_menu.add_command(label="📦 Batch Inspection", command=lambda: self.parent._run_batch_inspection())
+        tools_menu.add_separator()
+        tools_menu.add_command(label="📄 Open Log File", command=lambda: self.parent._open_log_file())
+    
+    def _go_home(self):
+        """Bring main Inspector window to front."""
+        self.parent._show_home()
+    
+    def _build_ui(self):
+        """Build the Simple Defect Detection UI."""
+        main_frame = tk.Frame(self, bg=self.BG_COLOR)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Left panel - Controls (Scrollable Container)
+        controls_container = tk.Frame(main_frame, bg=self.BG_COLOR, width=330)
+        controls_container.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        controls_container.pack_propagate(False)
+
+        # Create Canvas and Scrollbar
+        self.controls_canvas = tk.Canvas(controls_container, bg=self.BG_COLOR, highlightthickness=0)
+        self.controls_scrollbar = ttk.Scrollbar(controls_container, orient="vertical", command=self.controls_canvas.yview)
+        
+        # Scrollable Frame inside Canvas
+        self.scroll_content = tk.Frame(self.controls_canvas, bg=self.BG_COLOR)
+        
+        # Configure Scrollbar
+        self.controls_canvas.configure(yscrollcommand=self.controls_scrollbar.set)
+        
+        # Packing for Scrollbale Area
+        self.controls_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.controls_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Window in Canvas
+        self.canvas_window = self.controls_canvas.create_window((0, 0), window=self.scroll_content, anchor="nw")
+        
+        # Bindings for resizing and scrolling
+        self.scroll_content.bind("<Configure>", self._on_frame_configure)
+        self.controls_canvas.bind("<Configure>", self._on_canvas_configure)
+        
+        # Mousewheel scrolling (bind to canvas in this area)
+        self.controls_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+        # Pointer to where we actually add widgets (renamed for clarity in diff, but using old var name to minimize changes below would be easier... 
+        # actually let's re-assign controls_frame to point to our new inner frame so the rest of the code works with minimal changes)
+        controls_frame = self.scroll_content
+        
+        # Title
+        title_label = tk.Label(controls_frame, text="[ SIMPLE DEFECT DETECTION ]", 
+                              font=(self.FONT_FACE, 13, 'bold'),
+                              bg=self.BG_COLOR, fg=self.ACCENT_COLOR)
+        title_label.pack(pady=10)
+        
+        # Folder selection
+        folder_frame = tk.Frame(controls_frame, bg=self.BG_COLOR,
+                               highlightbackground=self.FG_COLOR, highlightthickness=1)
+        folder_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(folder_frame, text="< FOLDERS >", foreground=self.ACCENT_COLOR).pack(pady=5)
+        
+        ttk.Button(folder_frame, text="Select Input Folder",
+                  command=self._select_input).pack(fill=tk.X, padx=5, pady=2)
+        self.input_label = ttk.Label(folder_frame, text="Not selected", foreground="#888888")
+        self.input_label.pack(pady=(0, 5))
+        
+        ttk.Button(folder_frame, text="Select Output Folder",
+                  command=self._select_output).pack(fill=tk.X, padx=5, pady=2)
+        self.output_label = ttk.Label(folder_frame, text="Auto (input/BW_out)", foreground="#888888")
+        self.output_label.pack(pady=(0, 5))
+        
+        if self.current_image is not None and self.output_label.cget("text") == "Auto (input/BW_out)":
+             self._get_output_dir()
+            
+        # Load presets
+        self.presets_file = "defect_presets.json"
+        self._load_presets()
+
+        # Processing settings
+        settings_frame = tk.Frame(controls_frame, bg=self.BG_COLOR,
+                                 highlightbackground=self.FG_COLOR, highlightthickness=1)
+        settings_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(settings_frame, text="< PROCESSING SETTINGS >", foreground=self.ACCENT_COLOR).pack(pady=5)
+        
+        # Defect Presets (NEW)
+        self.preset_var = tk.StringVar(value="General")
+        preset_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
+        preset_row.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(preset_row, text="Preset", width=12).pack(side=tk.LEFT)
+        
+        self.preset_combo = ttk.Combobox(preset_row, textvariable=self.preset_var, 
+                                        values=list(self.DEFECT_PRESETS.keys()) + ["Custom"], 
+                                        state="readonly", width=15)
+        self.preset_combo.pack(side=tk.LEFT, padx=5)
+        self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_change)
+        
+        # Config Button (Gear)
+        ttk.Button(preset_row, text="⚙", width=3, command=self._open_preset_config).pack(side=tk.LEFT)
+        
+        # Auto Otsu checkbox
+        otsu_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
+        otsu_row.pack(fill=tk.X, padx=5, pady=3)
+        self.otsu_check = ttk.Checkbutton(otsu_row, text="🔄 Auto (Otsu) - Global threshold",
+                                          variable=self.use_otsu, command=self._on_threshold_mode_change)
+        self.otsu_check.pack(anchor=tk.W)
+        
+        # Adaptive thresholding checkbox
+        adaptive_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
+        adaptive_row.pack(fill=tk.X, padx=5, pady=3)
+        self.adaptive_check = ttk.Checkbutton(adaptive_row, text="📐 Adaptive - Local threshold",
+                                               variable=self.use_adaptive, command=self._on_threshold_mode_change)
+        self.adaptive_check.pack(anchor=tk.W)
+        
+        # Adaptive settings (block size and C)
+        adaptive_settings = tk.Frame(settings_frame, bg=self.BG_COLOR)
+        adaptive_settings.pack(fill=tk.X, padx=5, pady=2)
+        
+        block_row = tk.Frame(adaptive_settings, bg=self.BG_COLOR)
+        block_row.pack(fill=tk.X, pady=1)
+        ttk.Label(block_row, text="Block Size:", width=10).pack(side=tk.LEFT)
+        self.block_scale = ttk.Scale(block_row, from_=3, to=51, variable=self.adaptive_block_size,
+                                     command=self._on_manual_change)
+        self.block_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.block_label = ttk.Label(block_row, text="11", width=4)
+        self.block_label.pack(side=tk.LEFT)
+        
+        c_row = tk.Frame(adaptive_settings, bg=self.BG_COLOR)
+        c_row.pack(fill=tk.X, pady=1)
+        ttk.Label(c_row, text="C Constant:", width=10).pack(side=tk.LEFT)
+        self.c_scale = ttk.Scale(c_row, from_=-10, to=20, variable=self.adaptive_c,
+                                 command=self._on_manual_change)
+        self.c_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.c_label = ttk.Label(c_row, text="2", width=4)
+        self.c_label.pack(side=tk.LEFT)
+        
+        # Sigma slider
+        sigma_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
+        sigma_row.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(sigma_row, text="Sigma:", width=10).pack(side=tk.LEFT)
+        self.sigma_scale = ttk.Scale(sigma_row, from_=0.0, to=8.0, variable=self.sigma,
+                                     command=self._on_manual_change)
+        self.sigma_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.sigma_label = ttk.Label(sigma_row, text="1.20", width=5)
+        self.sigma_label.pack(side=tk.LEFT)
+        
+        # Threshold slider
+        thresh_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
+        thresh_row.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(thresh_row, text="Threshold:", width=10).pack(side=tk.LEFT)
+        self.thresh_scale = ttk.Scale(thresh_row, from_=0.0, to=1.0, variable=self.thresh,
+                                      command=self._on_manual_change)
+        self.thresh_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.thresh_label = ttk.Label(thresh_row, text="0.65", width=5)
+        self.thresh_label.pack(side=tk.LEFT)
+        
+        # Black% defect threshold
+        defect_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
+        defect_row.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(defect_row, text="DEFECT if black% >").pack(side=tk.LEFT)
+        ttk.Spinbox(defect_row, from_=0.0, to=100.0, increment=0.5,
+                   textvariable=self.black_defect_pct, width=7).pack(side=tk.LEFT, padx=5)
+        ttk.Label(defect_row, text="%").pack(side=tk.LEFT)
+        
+        # Apply initial state
+        self._on_threshold_mode_change()
+        
+        # Navigation
+        nav_frame = tk.Frame(controls_frame, bg=self.BG_COLOR,
+                            highlightbackground=self.FG_COLOR, highlightthickness=1)
+        nav_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(nav_frame, text="< PREVIEW >", foreground=self.ACCENT_COLOR).pack(pady=5)
+        
+        nav_btn_row = tk.Frame(nav_frame, bg=self.BG_COLOR)
+        nav_btn_row.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Button(nav_btn_row, text="<< Prev", command=self._prev_image).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ttk.Button(nav_btn_row, text="Next >>", command=self._next_image).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        
+        self.nav_info = ttk.Label(nav_frame, text="No images loaded", foreground="#888888")
+        self.nav_info.pack(pady=5)
+        
+        # Action buttons
+        action_frame = tk.Frame(controls_frame, bg=self.BG_COLOR)
+        action_frame.pack(fill=tk.X, padx=5, pady=10)
+        
+        process_btn = tk.Button(action_frame, text="▶ PROCESS ALL", 
+                               font=(self.FONT_FACE, 12, 'bold'),
+                               bg="#004400", fg="#00FF41",
+                               command=self._process_all)
+        process_btn.pack(fill=tk.X, pady=3)
+        
+        overview_btn = tk.Button(action_frame, text="📊 VIEW OVERVIEW", 
+                                font=(self.FONT_FACE, 11, 'bold'),
+                                bg="#440044", fg="#FF88FF",
+                                command=self._open_overview)
+        overview_btn.pack(fill=tk.X, pady=3)
+        
+        # Results info
+        result_frame = tk.Frame(controls_frame, bg=self.BG_COLOR,
+                               highlightbackground=self.FG_COLOR, highlightthickness=1)
+        result_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        ttk.Label(result_frame, text="< RESULTS >", foreground=self.ACCENT_COLOR).pack(pady=5)
+        
+        self.result_label = tk.Label(result_frame, text="--", 
+                                    font=(self.FONT_FACE, 14, 'bold'),
+                                    bg=self.BG_COLOR, fg="#888888")
+        self.result_label.pack(pady=5)
+        
+        self.stats_text = tk.Text(result_frame, bg="#111111", fg=self.FG_COLOR,
+                                 font=(self.FONT_FACE, 9), height=8, width=35)
+        self.stats_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Right panel - Image display
+        display_frame = tk.Frame(main_frame, bg=self.BG_COLOR)
+        display_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Original image
+        orig_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
+        orig_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+        ttk.Label(orig_frame, text="ORIGINAL").pack()
+        self.orig_label = tk.Label(orig_frame, bg="#111111")
+        self.orig_label.pack(fill=tk.BOTH, expand=True)
+        
+        # Binary image
+        bw_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
+        bw_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+        ttk.Label(bw_frame, text="BINARY").pack()
+        self.bw_label = tk.Label(bw_frame, bg="#111111")
+        self.bw_label.pack(fill=tk.BOTH, expand=True)
+        
+        # Status bar
+        self.status_var = tk.StringVar(value="Ready - Select input folder to begin")
+        status_bar = tk.Label(self, textvariable=self.status_var, 
+                             bg="#222222", fg=self.FG_COLOR,
+                             font=(self.FONT_FACE, 9), anchor=tk.W)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+    
+    def _on_frame_configure(self, event):
+        """Update scroll region when content changes."""
+        self.controls_canvas.configure(scrollregion=self.controls_canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        """Ensure inner frame fills canvas width."""
+        self.controls_canvas.itemconfig(self.canvas_window, width=event.width)
+        
+    def _on_mousewheel(self, event):
+        """Handle mousewheel scrolling."""
+        self.controls_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
+    
+    # === UTILITY FUNCTIONS (from pad_binary_gui.py) ===
+    
+    def _load_presets(self):
+        """Load presets from JSON file if exists, else use defaults."""
+        if os.path.exists(self.presets_file):
+            try:
+                import json
+                with open(self.presets_file, 'r') as f:
+                    saved = json.load(f)
+                    # Merge valid saved presets into defaults
+                    for k, v in saved.items():
+                        if k in self.DEFECT_PRESETS:
+                            self.DEFECT_PRESETS[k] = v
+                print(f"Loaded presets from {self.presets_file}")
+            except Exception as e:
+                print(f"Error loading presets: {e}")
+    
+    def _save_presets(self, new_presets):
+        """Save presets to JSON file and update current."""
+        import json
+        self.DEFECT_PRESETS = new_presets
+        try:
+            with open(self.presets_file, 'w') as f:
+                json.dump(self.DEFECT_PRESETS, f, indent=4)
+            print(f"saved presets to {self.presets_file}")
+        except Exception as e:
+            print(f"Error saving presets: {e}")
+            
+        # Refresh current view if currently using a preset
+        curr = self.preset_var.get()
+        if curr != "Custom":
+            self._on_preset_change()
+
+    def _open_preset_config(self):
+        """Open the preset configuration dialog."""
+        PresetConfigWindow(self, self.DEFECT_PRESETS, self._save_presets)
+
+    def _list_images(self, folder):
+        """List all supported image files in folder."""
+        import glob
+        files = []
+        for ext in self.SUPPORTED_EXTS:
+            files.extend(glob.glob(os.path.join(folder, "**", f"*{ext}"), recursive=True))
+            files.extend(glob.glob(os.path.join(folder, "**", f"*{ext.upper()}"), recursive=True))
+        return sorted(set(files))
+    
+    def _read_image_with_alpha(self, path):
+        """Read image, return (rgb, alpha)."""
+        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise ValueError(f"Cannot read image: {path}")
+        
+        if img.ndim == 2:
+            rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            alpha = None
+        elif img.shape[2] == 4:
+            bgr = img[:, :, :3]
+            alpha = img[:, :, 3]
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        else:
+            bgr = img[:, :, :3]
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            alpha = None
+        return rgb, alpha
+    
+    def _masked_gaussian_smooth(self, gray01, mask01, sigma):
+        """Normalized masked Gaussian (avoid boundary bleeding)."""
+        if sigma <= 0:
+            out = gray01.copy()
+            out[mask01 <= 0] = 0.0
+            return out
+        
+        k = int(6 * sigma + 1)
+        if k % 2 == 0:
+            k += 1
+        k = max(k, 3)
+        
+        num = cv2.GaussianBlur(gray01 * mask01, (k, k), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REFLECT)
+        den = cv2.GaussianBlur(mask01, (k, k), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REFLECT)
+        out = num / (den + 1e-8)
+        out[mask01 <= 0] = 0.0
+        return out
+    
+    def _compute_otsu_threshold(self, gray_u8, mask_bool=None):
+        """Compute Otsu's optimal threshold, normalized to 0-1."""
+        if mask_bool is not None:
+            masked_pixels = gray_u8[mask_bool]
+            if len(masked_pixels) == 0:
+                return 0.5
+            otsu_thresh, _ = cv2.threshold(masked_pixels, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        else:
+            otsu_thresh, _ = cv2.threshold(gray_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return otsu_thresh / 255.0
+    
+    def _compute_auto_sigma(self, gray_u8, mask_bool=None):
+        """Compute auto sigma based on noise estimation."""
+        if mask_bool is not None:
+            masked_gray = gray_u8.copy()
+            masked_gray[~mask_bool] = 0
+        else:
+            masked_gray = gray_u8
+        
+        laplacian = cv2.Laplacian(masked_gray, cv2.CV_64F)
+        noise_var = laplacian.var()
+        
+        if noise_var < 50:
+            sigma = 0.5
+        elif noise_var > 500:
+            sigma = 5.0
+        else:
+            sigma = 0.5 + (noise_var - 50) / 450 * 4.5
+        return round(sigma, 2)
+    
+    def _make_binary(self, rgb, alpha, sigma=1.2, thresh=0.65, use_otsu=False, 
+                      use_adaptive=False, block_size=11, c_value=2):
+        """RGB -> Gray -> masked Gaussian -> Threshold -> BW.
+        
+        Supports three modes:
+        - Manual: Uses provided sigma and thresh
+        - Otsu: Auto-computes global threshold using Otsu's method
+        - Adaptive: Uses local adaptive thresholding for varying illumination
+        """
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+        
+        if alpha is not None:
+            mask_bool = alpha > 0
+        else:
+            mask_bool = np.ones_like(gray, dtype=bool)
+        
+        mask01 = mask_bool.astype(np.float32)
+        gray_u8 = np.clip(gray * 255.0, 0, 255).astype(np.uint8)
+        
+        auto_params = None
+        
+        if use_adaptive:
+            # Adaptive thresholding - handles varying illumination
+            # Apply Gaussian smoothing first
+            smooth = self._masked_gaussian_smooth(gray, mask01, sigma=float(sigma))
+            smooth_u8 = np.clip(smooth * 255.0, 0, 255).astype(np.uint8)
+            
+            # Ensure block_size is odd
+            block = int(block_size)
+            if block % 2 == 0:
+                block += 1
+            block = max(3, block)
+            
+            # Apply adaptive threshold
+            bw = cv2.adaptiveThreshold(
+                smooth_u8, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY, block, int(c_value)
+            )
+            bw[~mask_bool] = 0
+            auto_params = (sigma, f"adaptive(b={block},c={c_value})")
+            
+        elif use_otsu:
+            sigma = self._compute_auto_sigma(gray_u8, mask_bool)
+            smooth = self._masked_gaussian_smooth(gray, mask01, sigma=float(sigma))
+            smooth_u8 = np.clip(smooth * 255.0, 0, 255).astype(np.uint8)
+            thresh = self._compute_otsu_threshold(smooth_u8, mask_bool)
+            auto_params = (sigma, thresh)
+            
+            T = int(np.clip(thresh, 0.0, 1.0) * 255)
+            bw = (smooth_u8 > T).astype(np.uint8) * 255
+            bw[~mask_bool] = 0
+        else:
+            smooth = self._masked_gaussian_smooth(gray, mask01, sigma=float(sigma))
+            smooth_u8 = np.clip(smooth * 255.0, 0, 255).astype(np.uint8)
+            
+            T = int(np.clip(thresh, 0.0, 1.0) * 255)
+            bw = (smooth_u8 > T).astype(np.uint8) * 255
+            bw[~mask_bool] = 0
+        
+        return gray_u8, smooth_u8, bw, mask_bool, auto_params
+    
+    def _compute_stats(self, bw_u8, mask_bool):
+        """Compute white/black pixel statistics."""
+        area_px = int(np.count_nonzero(mask_bool))
+        if area_px <= 0:
+            return 0, 0, 0, 0.0, 0.0
+        
+        white_px = int(np.count_nonzero((bw_u8 > 0) & mask_bool))
+        black_px = area_px - white_px
+        white_pct = 100.0 * white_px / area_px
+        black_pct = 100.0 * black_px / area_px
+        return white_px, black_px, area_px, white_pct, black_pct
+    
+    # === EVENT HANDLERS ===
+    
+    def _on_threshold_mode_change(self):
+        """Handle threshold mode change (Otsu/Adaptive/Manual)."""
+        use_otsu = self.use_otsu.get()
+        use_adaptive = self.use_adaptive.get()
+        
+        # Mutual exclusivity - if one is checked, uncheck the other
+        if use_otsu and use_adaptive:
+            # Last checked wins
+            if hasattr(self, '_last_mode') and self._last_mode == 'otsu':
+                self.use_otsu.set(False)
+                use_otsu = False
+            else:
+                self.use_adaptive.set(False)
+                use_adaptive = False
+        
+        self._last_mode = 'adaptive' if use_adaptive else ('otsu' if use_otsu else 'manual')
+        
+        # Update slider states
+        if use_otsu:
+            self.sigma_scale.configure(state="disabled")
+            self.thresh_scale.configure(state="disabled")
+            self.block_scale.configure(state="disabled")
+            self.c_scale.configure(state="disabled")
+        elif use_adaptive:
+            self.sigma_scale.configure(state="normal")
+            self.thresh_scale.configure(state="disabled")
+            self.block_scale.configure(state="normal")
+            self.c_scale.configure(state="normal")
+        else:
+            self.sigma_scale.configure(state="normal")
+            self.thresh_scale.configure(state="normal")
+            self.block_scale.configure(state="disabled")
+            self.c_scale.configure(state="disabled")
+        
+        self._refresh_preview()
+    
+    def _on_otsu_toggle(self):
+        """Legacy toggle - redirects to new handler."""
+        self._on_threshold_mode_change()
+    
+    def _select_input(self):
+        """Select input folder."""
+        folder = filedialog.askdirectory(title="Select Input Folder")
+        if not folder:
+            return
+        
+        self.input_folder.set(folder)
+        self.files = self._list_images(folder)
+        self.idx = 0
+        self.results = []
+        
+        if not self.files:
+            self.input_label.config(text="No images found", foreground="#FF4444")
+            messagebox.showwarning("No Images", "No supported image files found in folder.")
+            return
+        
+        self.input_label.config(text=os.path.basename(folder), foreground=self.FG_COLOR)
+        self.status_var.set(f"Loaded {len(self.files)} images from {os.path.basename(folder)}")
+        self._load_current()
+    
+    def _select_output(self):
+        """Select output folder."""
+        folder = filedialog.askdirectory(title="Select Output Folder")
+        if folder:
+            self.output_folder.set(folder)
+            self.output_label.config(text=os.path.basename(folder), foreground=self.FG_COLOR)
+    
+    def _get_output_dir(self):
+        """Get or create output directory."""
+        out = self.output_folder.get().strip()
+        if not out:
+            if self.input_folder.get().strip():
+                out = os.path.join(self.input_folder.get().strip(), "BW_out")
+        if out:
+            os.makedirs(out, exist_ok=True)
+        return out
+    
+    def _load_current(self):
+        """Load and display current image."""
+        if not self.files:
+            return
+        
+        path = self.files[self.idx]
+        try:
+            rgb, alpha = self._read_image_with_alpha(path)
+        except Exception as e:
+            messagebox.showerror("Read Error", str(e))
+            return
+        
+        self.current_image = rgb
+        self.current_alpha = alpha
+        self._refresh_preview()
+    
+    def _on_preset_change(self, event=None):
+        """Handle preset selection change."""
+        preset = self.preset_var.get()
+        if preset in self.DEFECT_PRESETS:
+            settings = self.DEFECT_PRESETS[preset]
+            
+            # Update variables without triggering callbacks recursively
+            self.sigma.set(settings["sigma"])
+            self.thresh.set(settings["thresh"])
+            self.adaptive_block_size.set(settings["block"])
+            self.adaptive_c.set(settings["c"])
+            
+            # Update labels
+            self.sigma_label.config(text=f"{settings['sigma']:.2f}")
+            self.thresh_label.config(text=f"{settings['thresh']:.2f}")
+            self.block_label.config(text=f"{int(settings['block'])}")
+            self.c_label.config(text=f"{int(settings['c'])}")
+            
+            # Force Adaptive Mode if not already
+            if not self.use_adaptive.get():
+                self.use_adaptive.set(True)
+                self.use_otsu.set(False)
+            
+            self._refresh_preview()
+
+    def _on_manual_change(self, *args):
+        """Handle manual slider adjustment -> switch to Custom preset."""
+        if self.preset_var.get() != "Custom":
+            self.preset_var.set("Custom")
+        self._refresh_preview()
+
+    def _refresh_preview(self):
+        """Refresh preview with current settings."""
+        if self.current_image is None:
+            return
+        
+        use_otsu = self.use_otsu.get()
+        use_adaptive = self.use_adaptive.get()
+        
+        result = self._make_binary(
+            self.current_image,
+            self.current_alpha,
+            sigma=float(self.sigma.get()),
+            thresh=float(self.thresh.get()),
+            use_otsu=use_otsu,
+            use_adaptive=use_adaptive,
+            block_size=int(self.adaptive_block_size.get()),
+            c_value=int(self.adaptive_c.get())
+        )
+        _, _, bw_u8, mask_bool, auto_params = result
+        
+        # Update labels based on mode
+        if use_otsu and auto_params:
+            auto_sigma, auto_thresh = auto_params
+            self.sigma.set(auto_sigma)
+            self.thresh.set(auto_thresh)
+            self.sigma_label.configure(text=f"{auto_sigma:.2f}")
+            self.thresh_label.configure(text=f"{auto_thresh:.2f}")
+        else:
+            self.sigma_label.configure(text=f"{self.sigma.get():.2f}")
+            self.thresh_label.configure(text=f"{self.thresh.get():.2f}")
+        
+        # Update adaptive labels
+        block_val = int(self.adaptive_block_size.get())
+        if block_val % 2 == 0:
+            block_val += 1
+        self.block_label.configure(text=str(block_val))
+        self.c_label.configure(text=str(int(self.adaptive_c.get())))
+        
+        self.current_bw = bw_u8
+        
+        # Compute stats
+        white_px, black_px, area_px, white_pct, black_pct = self._compute_stats(bw_u8, mask_bool)
+        
+        # Determine status
+        if black_pct > float(self.black_defect_pct.get()):
+            status = "DEFECT"
+            self.result_label.config(text="⚠ DEFECT", fg="#FF4444")
+        else:
+            status = "OK"
+            self.result_label.config(text="✓ OK", fg="#00FF41")
+        
+        # Update displays
+        self._display_image(self.current_image, self.orig_label, is_rgb=True)
+        self._display_image(bw_u8, self.bw_label, is_gray=True)
+        
+        # Update info
+        if self.files:
+            base = os.path.basename(self.files[self.idx])
+            self.nav_info.config(text=f"{self.idx+1}/{len(self.files)}: {base}")
+        
+        # Determine mode string for display
+        if use_adaptive:
+            mode_str = f"Adaptive (block={block_val}, C={int(self.adaptive_c.get())})"
+        elif use_otsu:
+            mode_str = "Otsu (auto)"
+        else:
+            mode_str = "Manual"
+        
+        # Update stats
+        self.stats_text.delete(1.0, tk.END)
+        self.stats_text.insert(tk.END, f"Status: {status}\n")
+        self.stats_text.insert(tk.END, f"Mode: {mode_str}\n")
+        self.stats_text.insert(tk.END, f"Black: {black_pct:.2f}% ({black_px} px)\n")
+        self.stats_text.insert(tk.END, f"White: {white_pct:.2f}% ({white_px} px)\n")
+        self.stats_text.insert(tk.END, f"Total Area: {area_px} px\n")
+        self.stats_text.insert(tk.END, f"\nDefect Threshold: >{self.black_defect_pct.get():.1f}%\n")
+        self.stats_text.insert(tk.END, f"Sigma: {self.sigma.get():.2f}\n")
+        if use_adaptive:
+            self.stats_text.insert(tk.END, f"Block Size: {block_val} | C: {int(self.adaptive_c.get())}")
+        elif not use_otsu:
+            self.stats_text.insert(tk.END, f"Threshold: {self.thresh.get():.2f}")
+    
+    def _prev_image(self):
+        """Navigate to previous image."""
+        if not self.files:
+            return
+        self.idx = (self.idx - 1) % len(self.files)
+        self._load_current()
+    
+    def _next_image(self):
+        """Navigate to next image."""
+        if not self.files:
+            return
+        self.idx = (self.idx + 1) % len(self.files)
+        self._load_current()
+    
+    def _process_all(self):
+        """Process all images and save to OK/DEFECT folders."""
+        if not self.files:
+            messagebox.showwarning("No Images", "Please select an input folder first.")
+            return
+        
+        out = self._get_output_dir()
+        if not out:
+            messagebox.showwarning("Output", "Please select an output folder.")
+            return
+        
+        # Create OK/DEFECT subfolders
+        out_ok = os.path.join(out, "OK")
+        out_ng = os.path.join(out, "DEFECT")
+        os.makedirs(out_ok, exist_ok=True)
+        os.makedirs(out_ng, exist_ok=True)
+        
+        use_otsu = self.use_otsu.get()
+        use_adaptive = self.use_adaptive.get()
+        sigma = float(self.sigma.get())
+        thresh = float(self.thresh.get())
+        block_size = int(self.adaptive_block_size.get())
+        c_value = int(self.adaptive_c.get())
+        black_th = float(self.black_defect_pct.get())
+        
+        self.results = []
+        defect_count = 0
+        
+        for i, path in enumerate(self.files, start=1):
+            self.status_var.set(f"Processing {i}/{len(self.files)}: {os.path.basename(path)}")
+            self.update_idletasks()
+            
+            try:
+                rgb, alpha = self._read_image_with_alpha(path)
+                result = self._make_binary(rgb, alpha, sigma=sigma, thresh=thresh, 
+                                          use_otsu=use_otsu, use_adaptive=use_adaptive,
+                                          block_size=block_size, c_value=c_value)
+                _, _, bw, mask_bool, _ = result
+                
+                white_px, black_px, area_px, white_pct, black_pct = self._compute_stats(bw, mask_bool)
+                status = "DEFECT" if black_pct > black_th else "OK"
+                
+                if status == "DEFECT":
+                    defect_count += 1
+                
+                # Save to appropriate folder
+                base = os.path.splitext(os.path.basename(path))[0]
+                save_dir = out_ng if status == "DEFECT" else out_ok
+                out_path = os.path.join(save_dir, f"{base}_BW.png")
+                cv2.imwrite(out_path, bw)
+                
+                self.results.append({
+                    "path": path,
+                    "rgb": rgb,
+                    "bw": bw,
+                    "white_pct": white_pct,
+                    "black_pct": black_pct,
+                    "status": status,
+                })
+            except Exception as e:
+                self.results.append({
+                    "path": path,
+                    "error": str(e),
+                    "status": "ERROR"
+                })
+        
+        self.status_var.set(f"Done! {defect_count}/{len(self.files)} defects found")
+        
+        messagebox.showinfo("Processing Complete",
+            f"Processed {len(self.files)} images.\n\n"
+            f"DEFECT: {defect_count}\n"
+            f"OK: {len(self.files) - defect_count}\n\n"
+            f"Saved to:\n• {out_ok}\n• {out_ng}")
+        
+        self._load_current()
+    
+    def _open_overview(self):
+        """Open overview window showing all results."""
+        if not self.results:
+            if not self.files:
+                messagebox.showwarning("No Data", "Please select input folder first.")
+                return
+            # Quick process without saving
+            self._quick_process()
+        
+        OverviewWindow(self, self.results, self.black_defect_pct.get())
+    
+    def _quick_process(self):
+        """Quick process all images without saving (for overview)."""
+        use_otsu = self.use_otsu.get()
+        use_adaptive = self.use_adaptive.get()
+        sigma = float(self.sigma.get())
+        thresh = float(self.thresh.get())
+        block_size = int(self.adaptive_block_size.get())
+        c_value = int(self.adaptive_c.get())
+        black_th = float(self.black_defect_pct.get())
+        
+        self.results = []
+        for path in self.files:
+            try:
+                rgb, alpha = self._read_image_with_alpha(path)
+                result = self._make_binary(rgb, alpha, sigma=sigma, thresh=thresh, 
+                                          use_otsu=use_otsu, use_adaptive=use_adaptive,
+                                          block_size=block_size, c_value=c_value)
+                _, _, bw, mask_bool, _ = result
+                _, _, _, white_pct, black_pct = self._compute_stats(bw, mask_bool)
+                status = "DEFECT" if black_pct > black_th else "OK"
+                self.results.append({
+                    "path": path, "rgb": rgb, "bw": bw,
+                    "white_pct": white_pct, "black_pct": black_pct, "status": status
+                })
+            except Exception as e:
+                self.results.append({"path": path, "error": str(e), "status": "ERROR"})
+    
+    def _display_image(self, img, label, size=(450, 400), is_gray=False, is_rgb=False):
+        """Display image in label."""
+        if img is None or img.size == 0:
+            return
+        
+        h, w = img.shape[:2]
+        ratio = min(size[0]/w, size[1]/h)
+        new_w, new_h = int(w * ratio), int(h * ratio)
+        
+        if new_w == 0 or new_h == 0:
+            return
+        
+        img_resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+        if is_gray or len(img_resized.shape) == 2:
+            img_resized = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2RGB)
+        elif not is_rgb:
+            img_resized = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        
+        photo = ImageTk.PhotoImage(image=Image.fromarray(img_resized))
+        label.config(image=photo)
+        label.image = photo
+
+
+class OverviewWindow(tk.Toplevel):
+    """Overview window for Simple Defect Detection results."""
+    
+    BG_COLOR = "#000000"
+    FG_COLOR = "#00FFFF"
+    
+    def __init__(self, parent, results, defect_threshold):
+        super().__init__(parent)
+        
+        self.title("Detection Overview - OK / DEFECT")
+        self.geometry("1200x800")
+        self.configure(bg=self.BG_COLOR)
+        
+        self.results = results
+        self.defect_threshold = defect_threshold
+        
+        self._build_ui()
+    
+    def _build_ui(self):
+        """Build overview UI."""
+        nb = ttk.Notebook(self)
+        nb.pack(fill=tk.BOTH, expand=True)
+        
+        # Separate results
+        ng_items = [r for r in self.results if r.get("status") == "DEFECT"]
+        ok_items = [r for r in self.results if r.get("status") == "OK"]
+        
+        # DEFECT tab
+        tab_ng = ttk.Frame(nb)
+        nb.add(tab_ng, text=f"DEFECT ({len(ng_items)})")
+        self._build_grid(tab_ng, ng_items)
+        
+        # OK tab
+        tab_ok = ttk.Frame(nb)
+        nb.add(tab_ok, text=f"OK ({len(ok_items)})")
+        self._build_grid(tab_ok, ok_items)
+    
+    def _build_grid(self, parent, items):
+        """Build scrollable grid of thumbnails."""
+        canvas = tk.Canvas(parent, bg="#111111")
+        vbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        vbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        frame = ttk.Frame(canvas, padding=10)
+        canvas.create_window((0, 0), window=frame, anchor=tk.NW)
+        
+        frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        
+        self._thumb_refs = []
+        cols = 5
+        thumb_max = (160, 160)
+        
+        for i, res in enumerate(items):
+            if "error" in res:
+                continue
+            
+            tile = ttk.Frame(frame, padding=5)
+            tile.grid(row=i//cols, column=i%cols, padx=5, pady=5, sticky=tk.N)
+            
+            # Create thumbnail
+            thumb = self._create_thumbnail(res.get("rgb"), thumb_max)
+            if thumb:
+                self._thumb_refs.append(thumb)
+                
+                name = os.path.basename(res.get("path", "?"))
+                black_pct = res.get("black_pct", 0)
+                
+                lbl = ttk.Label(tile, image=thumb,
+                              text=f"{name}\nblack={black_pct:.1f}%",
+                              compound=tk.TOP, justify=tk.CENTER)
+                lbl.pack()
+                
+                # Detail button
+                ttk.Button(tile, text="Details",
+                          command=lambda r=res: self._show_detail(r)).pack(pady=3)
+    
+    def _create_thumbnail(self, rgb_img, max_size):
+        """Create thumbnail from RGB image."""
+        if rgb_img is None:
+            return None
+        
+        h, w = rgb_img.shape[:2]
+        ratio = min(max_size[0]/w, max_size[1]/h)
+        new_w, new_h = int(w * ratio), int(h * ratio)
+        
+        if new_w == 0 or new_h == 0:
+            return None
+        
+        thumb = cv2.resize(rgb_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        return ImageTk.PhotoImage(image=Image.fromarray(thumb))
+    
+    def _show_detail(self, res):
+        """Show detail window for a result."""
+        d = tk.Toplevel(self)
+        d.title(os.path.basename(res.get("path", "Detail")))
+        d.geometry("900x700")
+        d.configure(bg=self.BG_COLOR)
+        
+        row = ttk.Frame(d, padding=10)
+        row.pack(fill=tk.BOTH, expand=True)
+        
+        # Original
+        if res.get("rgb") is not None:
+            img1 = self._create_large_image(res["rgb"], (400, 400))
+            if img1:
+                l1 = ttk.Label(row, image=img1, text="Original", compound=tk.TOP)
+                l1.image = img1
+                l1.pack(side=tk.LEFT, padx=10, pady=10, fill=tk.BOTH, expand=True)
+        
+        # Binary
+        if res.get("bw") is not None:
+            bw_rgb = cv2.cvtColor(res["bw"], cv2.COLOR_GRAY2RGB)
+            img2 = self._create_large_image(bw_rgb, (400, 400))
+            if img2:
+                l2 = ttk.Label(row, image=img2, text="Binary", compound=tk.TOP)
+                l2.image = img2
+                l2.pack(side=tk.LEFT, padx=10, pady=10, fill=tk.BOTH, expand=True)
+        
+        # Info
+        info = (
+            f"{os.path.basename(res.get('path', '?'))}\n"
+            f"Status: {res.get('status', '?')}\n"
+            f"White: {res.get('white_pct', 0):.2f}%\n"
+            f"Black: {res.get('black_pct', 0):.2f}%\n"
+            f"DEFECT if black% > {self.defect_threshold:.1f}%"
+        )
+        ttk.Label(d, text=info, padding=10).pack()
+    
+    def _create_large_image(self, rgb_img, max_size):
+        """Create large image for detail view."""
+        return self._create_thumbnail(rgb_img, max_size)
+
+
+
+
+# ==============================================================================
+# TAB-BASED TOOL CLASSES (for dockable notebook tabs)
+# ==============================================================================
+
+class QRCropperTab(tk.Frame):
+    """QR Code Detection and Cropping Tab (for notebook embedding)."""
+    
+    BG_COLOR = "#000000"
+    FG_COLOR = "#00FF41"
+    ACCENT_COLOR = "#00FF41"
+    FONT_FACE = "Consolas"
+    
+    def __init__(self, parent, app):
+        super().__init__(parent, bg=self.BG_COLOR)
+        self.app = app  # Reference to main app
+        
+        # Import QR extractor
+        from .qr_cropper import QRCodeExtractor
+        self.extractor = QRCodeExtractor()
+        
+        self.current_image = None
+        self.last_results = []
+        
+        self._build_ui()
+    
+    def _build_ui(self):
+        """Build the QR Cropper UI."""
+        # Main container
+        main_frame = tk.Frame(self, bg=self.BG_COLOR)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Colorful title bar
+        title_bar = tk.Frame(main_frame, bg="#003300")
+        title_bar.pack(fill=tk.X)
+        tk.Label(title_bar, text="🔲 QR CODE EXTRACTOR", 
+                font=(self.FONT_FACE, 12, 'bold'),
+                bg="#003300", fg=self.ACCENT_COLOR).pack(side=tk.LEFT, padx=10, pady=5)
+        
+        # Top panel - Controls
+        controls_frame = tk.Frame(main_frame, bg=self.BG_COLOR,
+                                 highlightbackground=self.FG_COLOR, highlightthickness=1)
+        controls_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Buttons with colored styling
+        tk.Button(controls_frame, text="📷 Load Image",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#004400", fg=self.FG_COLOR,
+                 command=self._load_image).pack(side=tk.LEFT, padx=2, pady=5)
+        
+        tk.Button(controls_frame, text="▶ Detect QR",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#004400", fg=self.FG_COLOR,
+                 command=self._detect_qr).pack(side=tk.LEFT, padx=2, pady=5)
+        
+        tk.Button(controls_frame, text="💾 Extract & Save",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#004400", fg=self.FG_COLOR,
+                 command=self._extract_and_save).pack(side=tk.LEFT, padx=2, pady=5)
+        
+        self.image_status = tk.Label(controls_frame, text="No image loaded", 
+                                    font=(self.FONT_FACE, 9),
+                                    bg=self.BG_COLOR, fg="#888888")
+        self.image_status.pack(side=tk.LEFT, padx=10)
+        
+        # Main content - Image and results side by side
+        content_frame = tk.Frame(main_frame, bg=self.BG_COLOR)
+        content_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Image display
+        self.image_label = tk.Label(content_frame, bg="#111111")
+        self.image_label.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+        
+        # Results panel
+        results_frame = tk.Frame(content_frame, bg=self.BG_COLOR, width=200)
+        results_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=2)
+        results_frame.pack_propagate(False)
+        
+        ttk.Label(results_frame, text="Results:").pack(anchor=tk.W, pady=2)
+        
+        self.results_text = tk.Text(results_frame, bg="#111111", fg=self.FG_COLOR,
+                                   font=(self.FONT_FACE, 8), height=15, width=25)
+        self.results_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Output folder
+        folder_frame = tk.Frame(results_frame, bg=self.BG_COLOR)
+        folder_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(folder_frame, text="Output:").pack(anchor=tk.W)
+        self.output_folder_var = tk.StringVar(value="qrcode_extraction")
+        ttk.Entry(folder_frame, textvariable=self.output_folder_var, width=20).pack(fill=tk.X)
+    
+    def _load_image(self):
+        """Load an image for QR detection."""
+        path = filedialog.askopenfilename(
+            title="Select Image",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff")]
+        )
+        if path:
+            try:
+                from .io import read_image
+                self.current_image = read_image(path)
+                self.image_status.config(text=os.path.basename(path)[:20], 
+                                        foreground=self.FG_COLOR)
+                self._display_image(self.current_image)
+                self.results_text.delete(1.0, tk.END)
+                self.results_text.insert(tk.END, "Image loaded. Click 'Detect QR'.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load: {e}")
+    
+    def _detect_qr(self):
+        """Detect QR codes in loaded image."""
+        if self.current_image is None:
+            messagebox.showwarning("No Image", "Please load an image first.")
+            return
+        
+        try:
+            results = self.extractor.detect_and_decode(self.current_image)
+            self.last_results = results
+            
+            annotated = self.extractor.annotate_image(self.current_image)
+            self._display_image(annotated)
+            
+            self.results_text.delete(1.0, tk.END)
+            if not results:
+                self.results_text.insert(tk.END, "No QR codes detected.")
+            else:
+                self.results_text.insert(tk.END, f"Found {len(results)} QR code(s):\n\n")
+                for qr in results:
+                    self.results_text.insert(tk.END, f"#{qr['id']}: {qr['data']}\n")
+        except Exception as e:
+            self.results_text.insert(tk.END, f"Error: {str(e)}")
+    
+    def _extract_and_save(self):
+        """Extract detected QR codes and save to folder."""
+        if self.current_image is None or not self.last_results:
+            self._detect_qr()
+            if not self.last_results:
+                return
+        
+        output_dir = self.output_folder_var.get()
+        self.extractor.output_dir = output_dir
+        
+        try:
+            saved_paths = self.extractor.save_cropped_qr(self.current_image)
+            if saved_paths:
+                self.results_text.insert(tk.END, f"\n\nSaved {len(saved_paths)} files to {output_dir}")
+                messagebox.showinfo("Success", f"Saved {len(saved_paths)} QR code(s)")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+    
+    def _display_image(self, cv2_image, size=(400, 350)):
+        """Display image in the label."""
+        if cv2_image is None:
+            return
+        h, w = cv2_image.shape[:2]
+        ratio = min(size[0]/w, size[1]/h)
+        new_w, new_h = int(w * ratio), int(h * ratio)
+        if new_w == 0 or new_h == 0:
+            return
+        img_resized = cv2.resize(cv2_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        if len(img_resized.shape) == 2:
+            img_resized = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2BGR)
+        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        photo = ImageTk.PhotoImage(image=Image.fromarray(img_rgb))
+        self.image_label.config(image=photo)
+        self.image_label.image = photo
+
+
+class GoldPadExtractorTab(tk.Frame):
+    """Gold Pad Extraction Tab (for notebook embedding)."""
+    
+    BG_COLOR = "#000000"
+    FG_COLOR = "#FFD700"
+    ACCENT_COLOR = "#FFD700"
+    FONT_FACE = "Consolas"
+    
+    def __init__(self, parent, app):
+        super().__init__(parent, bg=self.BG_COLOR)
+        self.app = app
+        
+        self.current_image = None
+        self.detected_pads = []
+        self.extracted_pads = []
+        
+        # HSV range for gold
+        self.hue_low = tk.IntVar(value=15)
+        self.hue_high = tk.IntVar(value=35)
+        self.sat_low = tk.IntVar(value=50)
+        self.sat_high = tk.IntVar(value=255)
+        self.val_low = tk.IntVar(value=100)
+        self.val_high = tk.IntVar(value=255)
+        
+        self.min_radius = tk.IntVar(value=20)
+        self.max_radius = tk.IntVar(value=100)
+        
+        self._build_ui()
+    
+    def _build_ui(self):
+        """Build the Gold Pad Extractor UI."""
+        main_frame = tk.Frame(self, bg=self.BG_COLOR)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Gold title bar
+        title_bar = tk.Frame(main_frame, bg="#332800")
+        title_bar.pack(fill=tk.X)
+        tk.Label(title_bar, text="🔶 GOLD PAD EXTRACTOR", 
+                font=(self.FONT_FACE, 12, 'bold'),
+                bg="#332800", fg=self.ACCENT_COLOR).pack(side=tk.LEFT, padx=10, pady=5)
+        
+        # Top controls with gold styling
+        controls_frame = tk.Frame(main_frame, bg=self.BG_COLOR,
+                                 highlightbackground=self.FG_COLOR, highlightthickness=1)
+        controls_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        tk.Button(controls_frame, text="📷 Load Image",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#443300", fg=self.FG_COLOR,
+                 command=self._load_image).pack(side=tk.LEFT, padx=2, pady=5)
+        tk.Button(controls_frame, text="👁 Preview",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#443300", fg=self.FG_COLOR,
+                 command=self._preview_detection).pack(side=tk.LEFT, padx=2, pady=5)
+        tk.Button(controls_frame, text="✂ Extract",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#443300", fg=self.FG_COLOR,
+                 command=self._extract_pads).pack(side=tk.LEFT, padx=2, pady=5)
+        tk.Button(controls_frame, text="💾 Save",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#443300", fg=self.FG_COLOR,
+                 command=self._save_pads).pack(side=tk.LEFT, padx=2, pady=5)
+        
+        self.status_label = tk.Label(controls_frame, text="No image loaded",
+                                    font=(self.FONT_FACE, 9),
+                                    bg=self.BG_COLOR, fg="#888888")
+        self.status_label.pack(side=tk.LEFT, padx=10)
+        
+        # HSV sliders in a compact row
+        hsv_frame = tk.Frame(main_frame, bg=self.BG_COLOR)
+        hsv_frame.pack(fill=tk.X, pady=2)
+        
+        tk.Label(hsv_frame, text="Hue:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        ttk.Scale(hsv_frame, from_=0, to=50, variable=self.hue_low, orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        ttk.Scale(hsv_frame, from_=0, to=50, variable=self.hue_high, orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        
+        tk.Label(hsv_frame, text="  Sat:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        ttk.Scale(hsv_frame, from_=0, to=255, variable=self.sat_low, orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        
+        tk.Label(hsv_frame, text="  Val:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        ttk.Scale(hsv_frame, from_=0, to=255, variable=self.val_low, orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        
+        # Image display
+        self.image_label = tk.Label(main_frame, bg="#111111")
+        self.image_label.pack(fill=tk.BOTH, expand=True)
+    
+    def _load_image(self):
+        """Load an image."""
+        path = filedialog.askopenfilename(
+            title="Select Image",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff")]
+        )
+        if path:
+            try:
+                from .io import read_image
+                self.current_image = read_image(path)
+                self.status_label.config(text=os.path.basename(path)[:25])
+                self._display_image(self.current_image)
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+    
+    def _get_gold_mask(self, image):
+        """Create HSV mask for gold regions."""
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        lower = np.array([self.hue_low.get(), self.sat_low.get(), self.val_low.get()])
+        upper = np.array([self.hue_high.get(), self.sat_high.get(), self.val_high.get()])
+        mask = cv2.inRange(hsv, lower, upper)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        return mask
+    
+    def _preview_detection(self):
+        """Preview the gold mask and detected circles."""
+        if self.current_image is None:
+            messagebox.showwarning("No Image", "Please load an image first.")
+            return
+        
+        mask = self._get_gold_mask(self.current_image)
+        preview = self.current_image.copy()
+        preview[mask > 0] = [0, 215, 255]  # Highlight gold areas
+        self._display_image(preview)
+        self.status_label.config(text=f"Gold area: {np.count_nonzero(mask)} px")
+    
+    def _extract_pads(self):
+        """Extract individual gold pad images."""
+        if self.current_image is None:
+            return
+        
+        mask = self._get_gold_mask(self.current_image)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        self.extracted_pads = []
+        preview = self.current_image.copy()
+        
+        for i, cnt in enumerate(contours):
+            area = cv2.contourArea(cnt)
+            if area < 500:
+                continue
+            
+            x, y, w, h = cv2.boundingRect(cnt)
+            pad_crop = self.current_image[y:y+h, x:x+w].copy()
+            self.extracted_pads.append(pad_crop)
+            cv2.rectangle(preview, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(preview, str(i+1), (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        
+        self._display_image(preview)
+        self.status_label.config(text=f"Extracted {len(self.extracted_pads)} pads")
+    
+    def _save_pads(self):
+        """Save extracted gold pads."""
+        if not self.extracted_pads:
+            self._extract_pads()
+        if not self.extracted_pads:
+            messagebox.showinfo("No Pads", "No gold pads detected to save.")
+            return
+        
+        folder = filedialog.askdirectory(title="Select Output Folder")
+        if folder:
+            for i, pad in enumerate(self.extracted_pads):
+                path = os.path.join(folder, f"gold_pad_{i+1:03d}.png")
+                cv2.imwrite(path, pad)
+            messagebox.showinfo("Saved", f"Saved {len(self.extracted_pads)} gold pads to {folder}")
+    
+    def _display_image(self, cv2_image, size=(500, 400)):
+        """Display image in the label."""
+        if cv2_image is None:
+            return
+        h, w = cv2_image.shape[:2]
+        ratio = min(size[0]/w, size[1]/h)
+        new_w, new_h = int(w * ratio), int(h * ratio)
+        if new_w == 0 or new_h == 0:
+            return
+        img_resized = cv2.resize(cv2_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        if len(img_resized.shape) == 2:
+            img_resized = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2BGR)
+        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        photo = ImageTk.PhotoImage(image=Image.fromarray(img_rgb))
+        self.image_label.config(image=photo)
+        self.image_label.image = photo
+
+
+class RedPadExtractorTab(tk.Frame):
+    """Red Pad Extraction Tab (for notebook embedding)."""
+    
+    BG_COLOR = "#000000"
+    FG_COLOR = "#FF4444"
+    ACCENT_COLOR = "#FF4444"
+    FONT_FACE = "Consolas"
+    
+    def __init__(self, parent, app):
+        super().__init__(parent, bg=self.BG_COLOR)
+        self.app = app
+        
+        self.current_image = None
+        self.extracted_pads = []
+        
+        # Red HSV range (wraps around 0)
+        self.hue_low1 = tk.IntVar(value=0)
+        self.hue_high1 = tk.IntVar(value=10)
+        self.hue_low2 = tk.IntVar(value=160)
+        self.hue_high2 = tk.IntVar(value=179)
+        self.sat_low = tk.IntVar(value=100)
+        self.val_low = tk.IntVar(value=100)
+        
+        self._build_ui()
+    
+    def _build_ui(self):
+        """Build the Red Pad Extractor UI."""
+        main_frame = tk.Frame(self, bg=self.BG_COLOR)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Red title bar
+        title_bar = tk.Frame(main_frame, bg="#330000")
+        title_bar.pack(fill=tk.X)
+        tk.Label(title_bar, text="🔴 RED PAD EXTRACTOR", 
+                font=(self.FONT_FACE, 12, 'bold'),
+                bg="#330000", fg=self.ACCENT_COLOR).pack(side=tk.LEFT, padx=10, pady=5)
+        
+        # Controls with red styling
+        controls_frame = tk.Frame(main_frame, bg=self.BG_COLOR,
+                                 highlightbackground=self.FG_COLOR, highlightthickness=1)
+        controls_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        tk.Button(controls_frame, text="📷 Load",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#440000", fg=self.FG_COLOR,
+                 command=self._load_image).pack(side=tk.LEFT, padx=2, pady=5)
+        tk.Button(controls_frame, text="👁 Preview",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#440000", fg=self.FG_COLOR,
+                 command=self._preview_detection).pack(side=tk.LEFT, padx=2, pady=5)
+        tk.Button(controls_frame, text="✂ Extract",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#440000", fg=self.FG_COLOR,
+                 command=self._extract_pads).pack(side=tk.LEFT, padx=2, pady=5)
+        tk.Button(controls_frame, text="💾 Save",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#440000", fg=self.FG_COLOR,
+                 command=self._save_pads).pack(side=tk.LEFT, padx=2, pady=5)
+        
+        self.status_label = tk.Label(controls_frame, text="No image loaded",
+                                    font=(self.FONT_FACE, 9),
+                                    bg=self.BG_COLOR, fg="#888888")
+        self.status_label.pack(side=tk.LEFT, padx=10)
+        
+        # Image display
+        self.image_label = tk.Label(main_frame, bg="#111111")
+        self.image_label.pack(fill=tk.BOTH, expand=True)
+    
+    def _load_image(self):
+        """Load an image."""
+        path = filedialog.askopenfilename(
+            title="Select Image",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff")]
+        )
+        if path:
+            try:
+                from .io import read_image
+                self.current_image = read_image(path)
+                self.status_label.config(text=os.path.basename(path)[:25])
+                self._display_image(self.current_image)
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+    
+    def _get_red_mask(self, image):
+        """Create HSV mask for red regions (dual hue range)."""
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        # Red wraps around, so we need two ranges
+        lower1 = np.array([self.hue_low1.get(), self.sat_low.get(), self.val_low.get()])
+        upper1 = np.array([self.hue_high1.get(), 255, 255])
+        lower2 = np.array([self.hue_low2.get(), self.sat_low.get(), self.val_low.get()])
+        upper2 = np.array([self.hue_high2.get(), 255, 255])
+        
+        mask1 = cv2.inRange(hsv, lower1, upper1)
+        mask2 = cv2.inRange(hsv, lower2, upper2)
+        mask = cv2.bitwise_or(mask1, mask2)
+        
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        return mask
+    
+    def _preview_detection(self):
+        """Preview the red mask."""
+        if self.current_image is None:
+            messagebox.showwarning("No Image", "Please load an image first.")
+            return
+        
+        mask = self._get_red_mask(self.current_image)
+        preview = self.current_image.copy()
+        preview[mask > 0] = [0, 0, 255]  # Highlight red areas
+        self._display_image(preview)
+        self.status_label.config(text=f"Red area: {np.count_nonzero(mask)} px")
+    
+    def _extract_pads(self):
+        """Extract individual red pad images."""
+        if self.current_image is None:
+            return
+        
+        mask = self._get_red_mask(self.current_image)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        self.extracted_pads = []
+        preview = self.current_image.copy()
+        
+        for i, cnt in enumerate(contours):
+            area = cv2.contourArea(cnt)
+            if area < 500:
+                continue
+            
+            x, y, w, h = cv2.boundingRect(cnt)
+            pad_crop = self.current_image[y:y+h, x:x+w].copy()
+            self.extracted_pads.append(pad_crop)
+            cv2.rectangle(preview, (x, y), (x+w, y+h), (255, 0, 0), 2)
+        
+        self._display_image(preview)
+        self.status_label.config(text=f"Extracted {len(self.extracted_pads)} pads")
+    
+    def _save_pads(self):
+        """Save extracted red pads."""
+        if not self.extracted_pads:
+            self._extract_pads()
+        if not self.extracted_pads:
+            messagebox.showinfo("No Pads", "No red pads detected to save.")
+            return
+        
+        folder = filedialog.askdirectory(title="Select Output Folder")
+        if folder:
+            for i, pad in enumerate(self.extracted_pads):
+                path = os.path.join(folder, f"red_pad_{i+1:03d}.png")
+                cv2.imwrite(path, pad)
+            messagebox.showinfo("Saved", f"Saved {len(self.extracted_pads)} red pads to {folder}")
+    
+    def _display_image(self, cv2_image, size=(500, 400)):
+        """Display image in the label."""
+        if cv2_image is None:
+            return
+        h, w = cv2_image.shape[:2]
+        ratio = min(size[0]/w, size[1]/h)
+        new_w, new_h = int(w * ratio), int(h * ratio)
+        if new_w == 0 or new_h == 0:
+            return
+        img_resized = cv2.resize(cv2_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        if len(img_resized.shape) == 2:
+            img_resized = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2BGR)
+        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        photo = ImageTk.PhotoImage(image=Image.fromarray(img_rgb))
+        self.image_label.config(image=photo)
+        self.image_label.image = photo
+
+
+class SimpleDefectDetectionTab(tk.Frame):
+    """Simple Defect Detection Tab (for notebook embedding) - Full featured version."""
+    
+    BG_COLOR = "#000000"
+    FG_COLOR = "#00FFFF"
+    ACCENT_COLOR = "#00FFFF"
+    FONT_FACE = "Consolas"
+    
+    SUPPORTED_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+    
+    def __init__(self, parent, app):
+        super().__init__(parent, bg=self.BG_COLOR)
+        self.app = app
+        
+        # Settings variables
+        self.input_folder = tk.StringVar(value="")
+        self.output_folder = tk.StringVar(value="")
+        self.sigma = tk.DoubleVar(value=1.2)
+        self.thresh = tk.DoubleVar(value=0.65)
+        self.use_otsu = tk.BooleanVar(value=True)
+        self.use_adaptive = tk.BooleanVar(value=False)
+        self.adaptive_block_size = tk.IntVar(value=11)
+        self.adaptive_c = tk.IntVar(value=2)
+        self.black_defect_pct = tk.DoubleVar(value=10.0)
+        
+        # Image state
+        self.files = []
+        self.idx = 0
+        self.current_image = None
+        self.current_alpha = None
+        self.current_bw = None
+        self.results = []  # For overview
+        
+        self._build_ui()
+    
+    def _build_ui(self):
+        """Build the Simple Defect Detection UI."""
+        main_frame = tk.Frame(self, bg=self.BG_COLOR)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Cyan title bar
+        title_bar = tk.Frame(main_frame, bg="#003333")
+        title_bar.pack(fill=tk.X)
+        tk.Label(title_bar, text="🔍 SIMPLE DEFECT DETECTION", 
+                font=(self.FONT_FACE, 12, 'bold'),
+                bg="#003333", fg=self.ACCENT_COLOR).pack(side=tk.LEFT, padx=10, pady=5)
+        
+        # Controls row with cyan styling
+        controls_frame = tk.Frame(main_frame, bg=self.BG_COLOR,
+                                 highlightbackground=self.FG_COLOR, highlightthickness=1)
+        controls_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        tk.Button(controls_frame, text="📁 Input Folder",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#004444", fg=self.FG_COLOR,
+                 command=self._select_input).pack(side=tk.LEFT, padx=2, pady=5)
+        tk.Button(controls_frame, text="▶ Process",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#004444", fg=self.FG_COLOR,
+                 command=self._process_current).pack(side=tk.LEFT, padx=2, pady=5)
+        tk.Button(controls_frame, text="⏩ Process All",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#004444", fg=self.FG_COLOR,
+                 command=self._process_all).pack(side=tk.LEFT, padx=2, pady=5)
+        
+        # Navigation
+        tk.Button(controls_frame, text="◀ Prev",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#003333", fg=self.FG_COLOR,
+                 command=self._prev_image).pack(side=tk.LEFT, padx=2, pady=5)
+        tk.Button(controls_frame, text="Next ▶",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#003333", fg=self.FG_COLOR,
+                 command=self._next_image).pack(side=tk.LEFT, padx=2, pady=5)
+        
+        self.file_label = tk.Label(controls_frame, text="No folder selected",
+                                  font=(self.FONT_FACE, 9),
+                                  bg=self.BG_COLOR, fg="#888888")
+        self.file_label.pack(side=tk.LEFT, padx=10)
+        
+        # Overview button on the right
+        tk.Button(controls_frame, text="📊 Overview",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 bg="#440044", fg="#FF88FF",
+                 command=self._open_overview).pack(side=tk.RIGHT, padx=2, pady=5)
+        
+        # Settings row 1 - Thresholding mode
+        settings_frame1 = tk.Frame(main_frame, bg=self.BG_COLOR)
+        settings_frame1.pack(fill=tk.X, pady=2, padx=5)
+        
+        tk.Label(settings_frame1, text="Mode:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        ttk.Checkbutton(settings_frame1, text="Otsu (Auto)", 
+                       variable=self.use_otsu).pack(side=tk.LEFT, padx=3)
+        ttk.Checkbutton(settings_frame1, text="Adaptive", 
+                       variable=self.use_adaptive).pack(side=tk.LEFT, padx=3)
+        
+        tk.Label(settings_frame1, text="│ Sigma:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Scale(settings_frame1, from_=0.0, to=5.0, variable=self.sigma, 
+                 orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        
+        tk.Label(settings_frame1, text="│ Thresh:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Scale(settings_frame1, from_=0.1, to=1.0, variable=self.thresh, 
+                 orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        
+        # Settings row 2 - Adaptive params and defect threshold
+        settings_frame2 = tk.Frame(main_frame, bg=self.BG_COLOR)
+        settings_frame2.pack(fill=tk.X, pady=2, padx=5)
+        
+        tk.Label(settings_frame2, text="Block:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        ttk.Scale(settings_frame2, from_=3, to=51, variable=self.adaptive_block_size, 
+                 orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        
+        tk.Label(settings_frame2, text="C:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Scale(settings_frame2, from_=-10, to=20, variable=self.adaptive_c, 
+                 orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        
+        tk.Label(settings_frame2, text="│ DEFECT if black% >", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Entry(settings_frame2, textvariable=self.black_defect_pct, width=5).pack(side=tk.LEFT)
+        tk.Label(settings_frame2, text="%", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        
+        # Image displays
+        display_frame = tk.Frame(main_frame, bg=self.BG_COLOR)
+        display_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Original
+        orig_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
+        orig_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+        tk.Label(orig_frame, text="Original", bg=self.BG_COLOR, fg=self.FG_COLOR).pack()
+        self.orig_label = tk.Label(orig_frame, bg="#111111")
+        self.orig_label.pack(fill=tk.BOTH, expand=True)
+        
+        # Binary
+        bw_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
+        bw_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+        tk.Label(bw_frame, text="Binary", bg=self.BG_COLOR, fg=self.FG_COLOR).pack()
+        self.bw_label = tk.Label(bw_frame, bg="#111111")
+        self.bw_label.pack(fill=tk.BOTH, expand=True)
+        
+        # Result label
+        self.result_label = tk.Label(main_frame, text="Result: --", 
+                                    font=(self.FONT_FACE, 14, 'bold'),
+                                    bg=self.BG_COLOR, fg=self.FG_COLOR)
+        self.result_label.pack(pady=5)
+    
+    def _select_input(self):
+        """Select input folder."""
+        folder = filedialog.askdirectory(title="Select Input Folder")
+        if folder:
+            self.input_folder.set(folder)
+            self.files = self._list_images(folder)
+            self.idx = 0
+            if self.files:
+                self._load_current()
+            self.file_label.config(text=f"{len(self.files)} images found")
+    
+    def _list_images(self, folder):
+        """List all supported image files in folder."""
+        files = []
+        for f in sorted(os.listdir(folder)):
+            if f.lower().endswith(self.SUPPORTED_EXTS):
+                files.append(os.path.join(folder, f))
+        return files
+    
+    def _load_current(self):
+        """Load current image."""
+        if not self.files or self.idx >= len(self.files):
+            return
+        
+        path = self.files[self.idx]
+        try:
+            from .io import read_image
+            self.current_image = read_image(path)
+            self.current_alpha = None
+            self._display_image(self.current_image, self.orig_label)
+            self.file_label.config(text=f"{self.idx+1}/{len(self.files)}: {os.path.basename(path)}")
+        except Exception as e:
+            self.file_label.config(text=f"Error: {e}")
+    
+    def _prev_image(self):
+        """Go to previous image."""
+        if self.idx > 0:
+            self.idx -= 1
+            self._load_current()
+    
+    def _next_image(self):
+        """Go to next image."""
+        if self.idx < len(self.files) - 1:
+            self.idx += 1
+            self._load_current()
+    
+    def _make_binary(self, rgb, alpha=None):
+        """Convert to binary using threshold, Otsu, or adaptive."""
+        if len(rgb.shape) == 3:
+            gray = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = rgb
+        
+        # Apply Gaussian blur if sigma > 0
+        sigma = self.sigma.get()
+        if sigma > 0:
+            k = int(6 * sigma + 1)
+            if k % 2 == 0:
+                k += 1
+            k = max(k, 3)
+            gray = cv2.GaussianBlur(gray, (k, k), sigma)
+        
+        if self.use_adaptive.get():
+            # Adaptive thresholding
+            block = int(self.adaptive_block_size.get())
+            if block % 2 == 0:
+                block += 1
+            block = max(3, block)
+            c = int(self.adaptive_c.get())
+            bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY, block, c)
+        elif self.use_otsu.get():
+            # Otsu thresholding
+            _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        else:
+            # Manual threshold
+            thresh_val = int(self.thresh.get() * 255)
+            _, bw = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY)
+        
+        return bw
+    
+    def _process_current(self):
+        """Process current image."""
+        if self.current_image is None:
+            messagebox.showwarning("No Image", "Please load an image first.")
+            return
+        
+        bw = self._make_binary(self.current_image, self.current_alpha)
+        self.current_bw = bw
+        self._display_image(cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR), self.bw_label)
+        
+        # Compute stats
+        total = bw.size
+        white = np.count_nonzero(bw)
+        black = total - white
+        white_pct = white / total * 100
+        black_pct = black / total * 100
+        
+        thresh = self.black_defect_pct.get()
+        if black_pct > thresh:
+            self.result_label.config(text=f"DEFECT: {black_pct:.1f}% black", foreground="#FF4444")
+        else:
+            self.result_label.config(text=f"OK: {black_pct:.1f}% black", foreground="#00FF00")
+    
+    def _process_all(self):
+        """Process all images in folder."""
+        if not self.files:
+            messagebox.showwarning("No Images", "Please select an input folder first.")
+            return
+        
+        results = {"ok": 0, "defect": 0}
+        
+        for i, path in enumerate(self.files):
+            try:
+                from .io import read_image
+                img = read_image(path)
+                bw = self._make_binary(img)
+                
+                total = bw.size
+                black = total - np.count_nonzero(bw)
+                black_pct = black / total * 100
+                
+                if black_pct > self.black_defect_pct.get():
+                    results["defect"] += 1
+                else:
+                    results["ok"] += 1
+            except:
+                pass
+        
+        messagebox.showinfo("Batch Complete", 
+            f"Processed {len(self.files)} images:\n\n"
+            f"OK: {results['ok']}\n"
+            f"DEFECT: {results['defect']}")
+    
+    def _display_image(self, cv2_image, label, size=(350, 300)):
+        """Display image in the label."""
+        if cv2_image is None:
+            return
+        h, w = cv2_image.shape[:2]
+        ratio = min(size[0]/w, size[1]/h)
+        new_w, new_h = int(w * ratio), int(h * ratio)
+        if new_w == 0 or new_h == 0:
+            return
+        img_resized = cv2.resize(cv2_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        if len(img_resized.shape) == 2:
+            img_resized = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2BGR)
+        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        photo = ImageTk.PhotoImage(image=Image.fromarray(img_rgb))
+        label.config(image=photo)
+        label.image = photo
+    
+    def _open_overview(self):
+        """Open overview window showing all processed results."""
+        if not self.files:
+            messagebox.showwarning("No Images", "Please select an input folder first.")
+            return
+        
+        # Quick process all images for overview
+        self.results = []
+        for path in self.files:
+            try:
+                from .io import read_image
+                img = read_image(path)
+                bw = self._make_binary(img)
+                
+                total = bw.size
+                white = np.count_nonzero(bw)
+                black = total - white
+                black_pct = black / total * 100
+                
+                status = "DEFECT" if black_pct > self.black_defect_pct.get() else "OK"
+                
+                # Convert to RGB for display
+                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                
+                self.results.append({
+                    "path": path,
+                    "rgb": rgb,
+                    "bw": bw,
+                    "white_pct": 100 - black_pct,
+                    "black_pct": black_pct,
+                    "status": status
+                })
+            except Exception as e:
+                self.results.append({"path": path, "error": str(e)})
+        
+        # Open overview window (using existing OverviewWindow class)
+        OverviewWindow(self, self.results, self.black_defect_pct.get())
+
+
+# ==============================================================================
 # MAIN
 # ==============================================================================
+
 
 def main():
     """Launch the GUI application.
@@ -1830,3 +4670,5 @@ if __name__ == "__main__":
     print("Starting GUI anyway...")
     print("")
     main()
+
+
