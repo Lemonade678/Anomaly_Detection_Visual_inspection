@@ -4,9 +4,14 @@ This is the PRIMARY processing module for the Anomaly Detection Visual Inspectio
 Use this file as the main entry point instead of modular_inspection_integrated/gui.py.
 
 Combines the best features from:
-- hybrid_1.py / Modular_inspection_1 (CLAHE, multi-scale, valid_area_mask, grid analyzer)
-- hybrid_2.py / modular_inspection2 (light sensitivity, multi-alignment, illumination normalization)
-
+# - hybrid_1.py / Modular_inspection_1 (CLAHE, multi-scale, valid_area_mask, grid analyzer)
+# - hybrid_2.py / modular_inspection2 (light sensitivity, multi-alignment, illumination normalization)
+#
+# NEW: Professional Multi-Window Architecture
+# - Tools open as independent, persistent windows
+# - Independent lifecycle: Closing main window keeps tools running
+# - Session Persistence: Restores open windows and layout on restart
+#
 Usage (Command Line):
     python hybrid_integrated.py              # Launch GUI (default)
     python hybrid_integrated.py --demo       # Run pipeline demo
@@ -533,6 +538,149 @@ def run_grid_analysis_demo():
 # MAIN ENTRY POINT
 # ==============================================================================
 
+
+# ==============================================================================
+# BATCH INSPECTION CLI
+# ==============================================================================
+
+def run_batch_inspection_cli(input_dir: str, output_dir: str, golden_path: str = None):
+    """Run batch inspection from command line."""
+    
+    # 1. Validate Input
+    if not os.path.exists(input_dir):
+        print(f"Error: Input directory not found: {input_dir}")
+        return
+        
+    # 2. Setup Output
+    os.makedirs(output_dir, exist_ok=True)
+    ok_dir = os.path.join(output_dir, "OK")
+    defect_dir = os.path.join(output_dir, "DEFECT")
+    error_dir = os.path.join(output_dir, "ERROR")
+    
+    os.makedirs(ok_dir, exist_ok=True)
+    os.makedirs(defect_dir, exist_ok=True)
+    os.makedirs(error_dir, exist_ok=True)
+    
+    # 3. Find Images
+    import glob
+    exts = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff']
+    image_files = []
+    for ext in exts:
+        image_files.extend(glob.glob(os.path.join(input_dir, ext)))
+        # Case insensitive check if needed (on Windows usually fine, but good practice)
+        
+    image_files = sorted(list(set(image_files)))
+    total = len(image_files)
+    
+    if total == 0:
+        print(f"No images found in {input_dir}")
+        return
+
+    # 4. Determine Golden Image
+    # If not provided, try to find 'golden_ref.*' in input or use first image
+    if not golden_path:
+        potential_golden = [f for f in image_files if "golden" in os.path.basename(f).lower() or "ref" in os.path.basename(f).lower()]
+        if potential_golden:
+            golden_path = potential_golden[0]
+            print(f"Auto-selected golden image: {os.path.basename(golden_path)}")
+        elif image_files:
+            golden_path = image_files[0]
+            print(f"Warning: No golden/ref image found. Using first image as golden: {os.path.basename(golden_path)}")
+        else:
+            print("Error: Could not determine golden image.")
+            return
+
+    # Load golden
+    from modular_inspection_integrated.io import read_image
+    golden_img = read_image(golden_path)
+    if golden_img is None:
+        print(f"Error: Failed to load golden image: {golden_path}")
+        return
+
+    print(f"\nStarting Batch Inspection of {total} images...")
+    print(f"Input: {input_dir}")
+    print(f"Output: {output_dir}")
+    print("-" * 60)
+
+    # 5. Process loop
+    processed_count = 0
+    anomalies_count = 0
+    
+    csv_path = os.path.join(output_dir, "batch_summary.csv")
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["Filename", "Verdict", "Confidence", "SSIM", "Area_Score", "Anomalies", "Processing_Time"])
+        
+        for i, img_path in enumerate(image_files):
+            fname = os.path.basename(img_path)
+            # Skip the golden image itself if it's in the list
+            if os.path.abspath(img_path) == os.path.abspath(golden_path):
+                continue
+                
+            print(f"Processing [{i+1}/{total}]: {fname}...", end="", flush=True)
+            
+            try:
+                test_img = read_image(img_path)
+                if test_img is None:
+                    print(" Failed to load.")
+                    continue
+                
+                # Run inspection
+                result = run_inspection(
+                    golden_img, test_img,
+                    alignment_method=AlignmentMethod.AUTO,
+                    light_mode=LightSensitivityMode.AUTO,
+                    verbose=False # Keep it quiet for batch
+                )
+                
+                verdict = result['verdict']
+                
+                # Save result
+                import shutil
+                if verdict == 'Normal':
+                    shutil.copy2(img_path, os.path.join(ok_dir, fname))
+                    print(" OK")
+                elif verdict == 'Anomaly':
+                    anomalies_count += 1
+                    # Save annotated image
+                    if 'contour_map' in result:
+                        cv2.imwrite(os.path.join(defect_dir, f"annotated_{fname}"), result['contour_map'])
+                    # Copy original
+                    shutil.copy2(img_path, os.path.join(defect_dir, fname))
+                    print(" DEFECT")
+                else:
+                    shutil.copy2(img_path, os.path.join(error_dir, fname))
+                    print(f" ERROR ({result.get('error', 'Unknown')})")
+                
+                # Log to CSV
+                writer.writerow([
+                    fname,
+                    verdict,
+                    f"{result.get('confidence',0):.2f}",
+                    f"{result.get('ssim_score',0):.4f}",
+                    f"{result.get('area_score',0):.2f}",
+                    result.get('anomaly_count', 0),
+                    f"{result.get('processing_time',0):.3f}"
+                ])
+                
+                processed_count += 1
+                
+            except Exception as e:
+                print(f" Exception: {e}")
+                # Try to copy to error folder
+                try:
+                    import shutil
+                    shutil.copy2(img_path, os.path.join(error_dir, fname))
+                except:
+                    pass
+
+    print("-" * 60)
+    print(f"Batch completed.")
+    print(f"Processed: {processed_count}")
+    print(f"Defects Found: {anomalies_count}")
+    print(f"See results in: {output_dir}")
+
+
 def run_gui():
     """Launch the integrated GUI application."""
     from modular_inspection_integrated.gui import InspectorApp
@@ -547,7 +695,26 @@ if __name__ == "__main__":
     
     if len(sys.argv) > 1:
         arg = sys.argv[1].lower()
-        if arg == "--demo":
+        
+        if arg == "--batch":
+            # Simple argument parsing for batch mode
+            # Usage: --batch -i <input> -o <output> [-g <golden>]
+            import argparse
+            parser = argparse.ArgumentParser(description="Run batch PCB inspection")
+            parser.add_argument("--batch", action="store_true", help="Enable batch mode")
+            parser.add_argument("-i", "--input", required=True, help="Input directory containing images")
+            parser.add_argument("-o", "--output", required=True, help="Output directory for results")
+            parser.add_argument("-g", "--golden", help="Path to golden/reference image (optional, auto-detected if omitted)")
+            
+            # remove --batch to parse the rest
+            # Actually easier to just parse normally if we are in this block
+            # But sys.argv might have triggered this block manually.
+            # Let's re-parse full args.
+            args = parser.parse_args()
+            
+            run_batch_inspection_cli(args.input, args.output, args.golden)
+            
+        elif arg == "--demo":
             run_inspection_demo()
             run_grid_analysis_demo()
         elif arg == "--grid-demo":
@@ -559,6 +726,7 @@ if __name__ == "__main__":
             print("")
             print("Usage:")
             print("  python hybrid_integrated.py              Launch GUI (default)")
+            print("  python hybrid_integrated.py --batch -i <in> -o <out> [-g <ref>]   Run batch inspection")
             print("  python hybrid_integrated.py --demo       Run pipeline demo")
             print("  python hybrid_integrated.py --grid-demo  Run grid analysis demo")
             print("  python hybrid_integrated.py --help       Show this help message")
@@ -567,13 +735,10 @@ if __name__ == "__main__":
             print("  from hybrid_integrated import run_inspection, run_inspection_with_config")
             print("  result = run_inspection(golden_image, test_image)")
             print("")
-            print("  OR for GUI:")
-            print("  from hybrid_integrated import run_gui")
-            print("  run_gui()")
-            print("")
         else:
             print(f"Unknown option: {arg}")
             print("Use --help for usage information")
     else:
         # Default: Launch GUI application
         run_gui()
+
