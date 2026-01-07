@@ -1,0 +1,26 @@
+{
+    "General": {
+        "sigma": 1.2,
+        "thresh": 0.65,
+        "block": 11,
+        "c": 2
+    },
+    "Scratches": {
+        "sigma": 2.56,
+        "thresh": 0.76,
+        "block": 15,
+        "c": 2
+    },
+    "Stains": {
+        "sigma": 3.87,
+        "thresh": 0.7,
+        "block": 15,
+        "c": 1
+    },
+    "Pinholes": {
+        "sigma": 0.8,
+        "thresh": 0.6,
+        "block": 9,
+        "c": 5
+    }
+}
