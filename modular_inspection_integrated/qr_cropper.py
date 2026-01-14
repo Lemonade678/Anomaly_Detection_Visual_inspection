@@ -62,7 +62,7 @@ class QRCodeExtractor:
         versions.append(enhanced)
         
         # Version 3: Otsu threshold (binary)
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_TRIANGLE)
         versions.append(binary)
         
         # Version 4: Inverted binary (for white-on-dark QR codes)
