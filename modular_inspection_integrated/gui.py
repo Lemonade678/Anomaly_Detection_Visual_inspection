@@ -40,6 +40,64 @@ from .template_match import run_template_inspection, TemplateMatchConfig
 # ANOMALY LOCATION MAPPER
 # ==============================================================================
 
+
+# ==============================================================================
+# TOOLTIP CLASS
+# ==============================================================================
+
+class ToolTip(object):
+    """
+    Create a tooltip for a given widget.
+    """
+    def __init__(self, widget, text='widget info'):
+        self.waittime = 500     # miliseconds
+        self.wraplength = 180   # pixels
+        self.widget = widget
+        self.text = text
+        self.widget.bind("<Enter>", self.enter)
+        self.widget.bind("<Leave>", self.leave)
+        self.widget.bind("<ButtonPress>", self.leave)
+        self.id = None
+        self.tw = None
+
+    def enter(self, event=None):
+        self.schedule()
+
+    def leave(self, event=None):
+        self.unschedule()
+        self.hidetip()
+
+    def schedule(self):
+        self.unschedule()
+        self.id = self.widget.after(self.waittime, self.showtip)
+
+    def unschedule(self):
+        id = self.id
+        self.id = None
+        if id:
+            self.widget.after_cancel(id)
+
+    def showtip(self, event=None):
+        x = y = 0
+        x, y, cx, cy = self.widget.bbox("insert")
+        x += self.widget.winfo_rootx() + 25
+        y += self.widget.winfo_rooty() + 20
+        # creates a toplevel window
+        self.tw = tk.Toplevel(self.widget)
+        # Leaves only the label and removes the app window
+        self.tw.wm_overrideredirect(True)
+        self.tw.wm_geometry("+%d+%d" % (x, y))
+        label = tk.Label(self.tw, text=self.text, justify='left',
+                       background="#ffffdd", relief='solid', borderwidth=1,
+                       wraplength = self.wraplength)
+        label.pack(ipadx=1)
+
+    def hidetip(self):
+        tw = self.tw
+        self.tw= None
+        if tw:
+            tw.destroy()
+
 class AnomalyLocationMapper:
     """Maps and reports anomaly locations with pixel coordinates."""
     
@@ -132,7 +190,7 @@ class AnomalyLocationMapper:
 # MAIN GUI APPLICATION
 # ==============================================================================
 
-class InspectorApp(tk.Tk):
+class PixelInspectionWindow(tk.Toplevel):
     """Integrated PCB Inspector GUI Application."""
     
     # Theme colors
@@ -144,10 +202,11 @@ class InspectorApp(tk.Tk):
     
     SSIM_PASS_THRESHOLD = 0.975
     
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
         
-        self.title("Integrated PCB Inspector - Advanced Edition")
+        self.title("pixel_inspection_system(hiatus)")
         self.geometry("1600x1000")
         self.state('zoomed')  # Start maximized
         self.configure(bg=self.BG_COLOR)
@@ -176,6 +235,9 @@ class InspectorApp(tk.Tk):
         self.gamma_value = 1.0
         self.anomaly_mapper = AnomalyLocationMapper()
         
+        # Canvas metadata for coordinate tracking: {canvas: (ratio, off_x, off_y, orig_w, orig_h)}
+        self.canvas_meta = {}
+        
         # Template matching settings
         self.template_grid_cols = 4
         self.template_grid_rows = 4
@@ -191,342 +253,30 @@ class InspectorApp(tk.Tk):
         
         # Build UI
         self._setup_styles()
+        self._build_menu()
         self._build_ui()
-        self._build_menu_bar()
         
-        # Handle close and load session
+        # Handle close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(500, self._load_session)  # Load session after UI settles
-    
-    def _build_menu_bar(self):
-        """Build the menu bar with Tools menu."""
-        menubar = tk.Menu(self)
-        self.config(menu=menubar)
-        
-        # Tools menu
-        tools_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Tools", menu=tools_menu)
-        tools_menu.add_command(label="🔲 QR Code Extractor", command=self._open_qr_cropper)
-        tools_menu.add_command(label="🔶 Gold Pad Extractor", command=self._open_gold_pad_extractor)
-        tools_menu.add_command(label="🔴 Red Pad Extractor", command=self._open_red_pad_extractor)
-        tools_menu.add_command(label="🔍 Simple Defect Detection", command=self._open_simple_defect_detection)
-        tools_menu.add_separator()
-        tools_menu.add_command(label="📦 Batch Inspection", command=self._run_batch_inspection)
-        tools_menu.add_separator()
-        tools_menu.add_command(label="📄 Open Log File", command=self._open_log_file)
-        
-        # Help menu
-        help_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Help", menu=help_menu)
-        help_menu.add_command(label="About", command=self._show_about)
-    
-    def _open_tool_window(self, name: str, WindowClass):
-        """Open or focus a tool window (singleton pattern)."""
-        # Check if window already exists
-        if name in self.tool_windows:
-            win = self.tool_windows[name]
-            if win.winfo_exists():
-                win.deiconify()
-                win.lift()
-                win.focus_force()
-                return win
-            else:
-                del self.tool_windows[name]
-        
-        # Create new window
-        win = WindowClass(self)
-        self.tool_windows[name] = win
-        
-        # Hook into window close event to manage app lifecycle
-        win.protocol("WM_DELETE_WINDOW", lambda: self._on_tool_close(name))
-        
-        return win
-    
-    def _on_tool_close(self, name):
-        """Handle tool window closure."""
-        if name in self.tool_windows:
-            win = self.tool_windows[name]
-            # Save geometry before destroying
-            self.tool_windows[name].geometry_saved = win.geometry()
-            win.destroy()
-            del self.tool_windows[name]
-        
-        # Check if we should exit the app (if main is hidden and no tools left)
-        self._check_exit_condition()
+        # self.after(500, self._load_session) # Removed
 
+    
     def _on_close(self):
-        """Handle application closure."""
-        self._save_session()
-        
-        # If tool windows are open, just hide the main window (don't exit)
-        if self.tool_windows:
-            self.withdraw()  # Hide main window
-        else:
-            self.destroy()
-            sys.exit(0)
-            
-    def _check_exit_condition(self):
-        """Exit app if main window is hidden and no tool windows are open."""
-        # If main window is hidden (not visible) AND no tool windows are open
-        if self.state() == 'withdrawn' or not self.winfo_viewable():
-            if not self.tool_windows:
-                self.destroy()
-                sys.exit(0)
-
-    def _show_home(self):
-        """Show the main inspector window."""
-        self.deiconify()
-        self.lift()
-        self.focus_force()
-
-    def _save_session(self):
-        """Save current window state to session file."""
-        session_data = {
-            "main_geometry": self.geometry(),
-            "tools": {}
-        }
-        
-        for name, win in self.tool_windows.items():
-            if win.winfo_exists():
-                session_data["tools"][name] = {
-                    "geometry": win.geometry()
-                }
-        
+        """Handle window closure."""
         try:
-            with open(self.session_file, 'w') as f:
-                json.dump(session_data, f)
-        except Exception as e:
-            print(f"Error saving session: {e}")
-            
-    def _load_session(self):
-        """Restore window state from session file."""
-        if not os.path.exists(self.session_file):
-            return
-            
+            self.display_canvas.unbind_all("<MouseWheel>")
+        except:
+            pass
+        self.destroy()
+    
+    def _go_back_to_main(self):
+        """Close this window and go back to main InspectorApp."""
         try:
-            with open(self.session_file, 'r') as f:
-                data = json.load(f)
-            
-            if "main_geometry" in data:
-                self.geometry(data["main_geometry"])
-            
-            if "tools" in data:
-                for name, info in data["tools"].items():
-                    if name == "QR Extractor":
-                        self._open_qr_cropper()
-                    elif name == "Gold Pad":
-                        self._open_gold_pad_extractor()
-                    elif name == "Red Pad":
-                        self._open_red_pad_extractor()
-                    elif name == "Defect Detection":
-                        self._open_simple_defect_detection()
-                    
-                    if name in self.tool_windows:
-                        win = self.tool_windows[name]
-                        if "geometry" in info:
-                            win.geometry(info["geometry"])
-                        
-        except Exception as e:
-            print(f"Error loading session: {e}")
-
-    def _open_qr_cropper(self):
-        """Open QR Code Extractor in a new window."""
-        self._open_tool_window("QR Extractor", QRCropperWindow)
-    
-    def _open_gold_pad_extractor(self):
-        """Open Gold Pad Extractor in a new window."""
-        self._open_tool_window("Gold Pad", GoldPadExtractorWindow)
-    
-    def _open_red_pad_extractor(self):
-        """Open Red Pad Extractor in a new window."""
-        self._open_tool_window("Red Pad", RedPadExtractorWindow)
-    
-    def _open_simple_defect_detection(self):
-        """Open Simple Defect Detection in a new window."""
-        self._open_tool_window("Defect Detection", SimpleDefectDetectionWindow)
-    
-    def _run_batch_inspection(self):
-        """Run batch inspection on a folder of images."""
-        # Select input folder
-        input_folder = filedialog.askdirectory(title="Select Input Folder (Reference/Test Pairs)")
-        if not input_folder:
-            return
-        
-        # Select output folder
-        output_folder = filedialog.askdirectory(title="Select Output Folder")
-        if not output_folder:
-            output_folder = os.path.join(input_folder, "Inspection_Results")
-        
-        # Find all test images (matching *_test* pattern or similar)
-        import glob
-        supported_exts = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
-        all_images = []
-        for ext in supported_exts:
-            all_images.extend(glob.glob(os.path.join(input_folder, f"*{ext}")))
-            all_images.extend(glob.glob(os.path.join(input_folder, f"*{ext.upper()}")))
-        
-        if not all_images:
-            messagebox.showwarning("No Images", "No image files found in the selected folder.")
-            return
-        
-        # Create output folders
-        out_ok = os.path.join(output_folder, "OK")
-        out_defect = os.path.join(output_folder, "DEFECT")
-        out_error = os.path.join(output_folder, "ERROR")
-        os.makedirs(out_ok, exist_ok=True)
-        os.makedirs(out_defect, exist_ok=True)
-        os.makedirs(out_error, exist_ok=True)
-        
-        # Get current settings
-        align_method = self.align_method_var.get()
-        light_mode = self.light_mode_var.get()
-        inspect_mode = self.inspect_mode_var.get()
-        ssim_thresh = float(self.ssim_var.get())
-        pixel_thresh = float(self.pixel_threshold_var.get())
-        noise_filter = int(self.noise_var.get())
-        
-        results = []
-        total = len(all_images)
-        ok_count = 0
-        defect_count = 0
-        error_count = 0
-        
-        # Progress window
-        progress_win = tk.Toplevel(self)
-        progress_win.title("Batch Inspection Progress")
-        progress_win.geometry("400x150")
-        progress_win.configure(bg=self.BG_COLOR)
-        
-        progress_label = tk.Label(progress_win, text="Starting...", 
-                                  bg=self.BG_COLOR, fg=self.FG_COLOR,
-                                  font=(self.FONT_FACE, 10))
-        progress_label.pack(pady=20)
-        
-        progress_bar = ttk.Progressbar(progress_win, length=300, mode='determinate')
-        progress_bar.pack(pady=10)
-        
-        for i, test_path in enumerate(all_images, start=1):
-            progress_label.config(text=f"Processing {i}/{total}: {os.path.basename(test_path)}")
-            progress_bar['value'] = (i / total) * 100
-            progress_win.update()
-            
-            try:
-                # Read test image
-                from .io import read_image
-                test_img = read_image(test_path)
-                
-                # Get reference image path (assume same name in "reference" subfolder or use currently loaded)
-                ref_path = test_path.replace("test", "reference").replace("Test", "Reference")
-                if os.path.exists(ref_path):
-                    ref_img = read_image(ref_path)
-                elif self.ref_image is not None:
-                    ref_img = self.ref_image
-                else:
-                    # Use the first reference if available
-                    ref_candidates = glob.glob(os.path.join(input_folder, "*ref*"))
-                    if ref_candidates:
-                        ref_img = read_image(ref_candidates[0])
-                    else:
-                        raise ValueError("No reference image found")
-                
-                # Run inspection pipeline
-                from .align import align_images
-                from .inspection import run_inspection
-                
-                aligned_test, _, _ = align_images(ref_img, test_img, method=align_method)
-                
-                result = run_inspection(
-                    ref_img, aligned_test,
-                    light_sensitivity=light_mode,
-                    match_mode=inspect_mode,
-                    ssim_threshold=ssim_thresh,
-                    pixel_threshold=pixel_thresh,
-                    noise_filter_size=noise_filter,
-                    gold_focus=self.gold_focus_var.get() if hasattr(self, 'gold_focus_var') else False
-                )
-                
-                verdict = result.get('verdict', 'UNKNOWN')
-                
-                if verdict == 'OK':
-                    ok_count += 1
-                    save_dir = out_ok
-                else:
-                    defect_count += 1
-                    save_dir = out_defect
-                
-                # Save result image
-                base = os.path.splitext(os.path.basename(test_path))[0]
-                result_path = os.path.join(save_dir, f"{base}_result.png")
-                if result.get('diff_image') is not None:
-                    cv2.imwrite(result_path, result['diff_image'])
-                
-                results.append({
-                    'path': test_path,
-                    'verdict': verdict,
-                    'ssim': result.get('ssim', 0),
-                    'diff_pct': result.get('diff_percentage', 0),
-                    'reason': result.get('verdict_reason', '')
-                })
-                
-            except Exception as e:
-                error_count += 1
-                results.append({'path': test_path, 'verdict': 'ERROR', 'error': str(e)})
-                shutil.copy(test_path, out_error) if os.path.exists(test_path) else None
-        
-        progress_win.destroy()
-        
-        # Write summary report
-        from datetime import datetime
-        summary_path = os.path.join(output_folder, f"batch_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
-        with open(summary_path, 'w') as f:
-            f.write("BATCH INSPECTION SUMMARY\n")
-            f.write("=" * 50 + "\n\n")
-            f.write(f"Total Images: {total}\n")
-            f.write(f"OK: {ok_count}\n")
-            f.write(f"DEFECT: {defect_count}\n")
-            f.write(f"ERROR: {error_count}\n\n")
-            f.write("Settings:\n")
-            f.write(f"  Alignment: {align_method}\n")
-            f.write(f"  Light Mode: {light_mode}\n")
-            f.write(f"  Inspect Mode: {inspect_mode}\n")
-            f.write(f"  SSIM Threshold: {ssim_thresh}\n")
-            f.write(f"  Pixel Threshold: {pixel_thresh}\n\n")
-            f.write("Results:\n")
-            for r in results:
-                f.write(f"  {os.path.basename(r['path'])}: {r['verdict']}\n")
-        
-        messagebox.showinfo("Batch Complete",
-            f"Batch inspection complete!\n\n"
-            f"Total: {total}\n"
-            f"OK: {ok_count}\n"
-            f"DEFECT: {defect_count}\n"
-            f"ERROR: {error_count}\n\n"
-            f"Results saved to:\n{output_folder}")
-    
-    def _open_log_file(self):
-        """Open the log file location."""
-        import subprocess
-        if os.path.exists(self.log_file):
-            subprocess.run(['explorer', '/select,', os.path.abspath(self.log_file)])
-        else:
-            messagebox.showinfo("Log File", f"Log file location:\n{os.path.abspath(self.log_file)}")
-    
-    def _show_about(self):
-        """Show about dialog."""
-        about_text = """
-INTEGRATED PCB INSPECTOR
-Version 1.0.0
-
-Features:
-• Multi-method alignment (ORB/SIFT/ECC/Phase)
-• Light sensitivity modes
-• SSIM + Pixel matching pipeline
-• Anomaly location mapping
-• QR Code extraction
-
-Combined from Modular_inspection_1 + modular_inspection2
-        """
-        messagebox.showinfo("About", about_text.strip())
+            self.display_canvas.unbind_all("<MouseWheel>")
+        except:
+            pass
+        self.destroy()
+        # Main window is managed by InspectorApp, which should still be running
     
     def _init_log_file(self):
         """Initialize log file with headers."""
@@ -535,6 +285,45 @@ Combined from Modular_inspection_1 + modular_inspection2
                 writer = csv.writer(f)
                 writer.writerow(['Timestamp', 'Image', 'Verdict', 'AreaScore', 
                                'AnomalyCount', 'PixelVerdict', 'SSIM', 'Time'])
+    
+    def _build_menu(self):
+        """Build menu bar with navigation and help."""
+        menubar = tk.Menu(self)
+        self.config(menu=menubar)
+        
+        # Navigate menu
+        nav_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Navigate", menu=nav_menu)
+        nav_menu.add_command(label="← Back to Main Window", command=self._go_back_to_main)
+        nav_menu.add_separator()
+        nav_menu.add_command(label="Close This Window", command=self._on_close)
+        
+        # Help menu
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="How to Use", command=self._show_help)
+        help_menu.add_command(label="About", command=self._show_about)
+    
+    def _show_help(self):
+        """Show help dialog."""
+        help_text = """Pixel Inspection System (Hiatus)
+
+This tool compares a Golden (reference) image with a Test image to detect anomalies.
+
+1. Load Golden Image: Select the reference/master image.
+2. Load Test Image: Select the image to inspect.
+3. Click 'Inspect' to run the analysis.
+4. Results show SSIM score, pixel differences, and anomaly locations.
+
+Settings:
+- Alignment: Choose method for aligning images (Auto, Phase, ORB, etc.)
+- Light Mode: Adjust for different lighting conditions.
+- Inspection Mode: Choose between Pixel-Wise or Template matching."""
+        messagebox.showinfo("Help - Pixel Inspection", help_text)
+    
+    def _show_about(self):
+        """Show about dialog."""
+        messagebox.showinfo("About", "Pixel Inspection System (Hiatus)\n\nAdvanced PCB inspection with SSIM and pixel matching.\n\nPart of Integrated PCB Inspector.")
     
     def _setup_styles(self):
         """Configure ttk styles."""
@@ -581,8 +370,13 @@ Combined from Modular_inspection_1 + modular_inspection2
         self.display_canvas.configure(yscrollcommand=display_scrollbar.set)
         
         # Bind mousewheel for scrolling display area
+        # Bind mousewheel for scrolling display area
         def _on_display_mousewheel(event):
-            self.display_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            try:
+                if self.winfo_exists():
+                    self.display_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            except (tk.TclError, AttributeError):
+                pass
         
         self.display_canvas.bind_all("<MouseWheel>", _on_display_mousewheel)
         
@@ -596,11 +390,17 @@ Combined from Modular_inspection_1 + modular_inspection2
     
     def _build_controls(self, parent):
         """Build control panel."""
-        # Title
         title_label = tk.Label(parent, text="[ INTEGRATED INSPECTOR ]",
                               font=(self.FONT_FACE, 14, 'bold'),
                               bg=self.BG_COLOR, fg=self.ACCENT_COLOR)
         title_label.pack(pady=10)
+        
+        # Back to Main button
+        back_btn = tk.Button(parent, text="← Back to Main", 
+                            font=(self.FONT_FACE, 9),
+                            bg="#333333", fg=self.FG_COLOR,
+                            command=self._go_back_to_main)
+        back_btn.pack(fill=tk.X, padx=10, pady=(0, 5))
         
         # === IMAGE LOADING ===
         load_frame = tk.Frame(parent, bg=self.BG_COLOR,
@@ -784,13 +584,7 @@ Combined from Modular_inspection_1 + modular_inspection2
         self.stats_label = ttk.Label(parent, text="", justify=tk.LEFT)
         self.stats_label.pack(fill=tk.X, padx=10)
     def _build_display_area(self, parent):
-        """Build image display area as 2x3 grid.
-        
-        Layout:
-        Row 1: [Golden Image]        [Sample/Test Image]
-        Row 2: [Aligned/Contour]     [ANOMALY HEATMAP] <-- center right
-        Row 3: [SSIM Heatmap]        [Contour Map]
-        """
+        """Build image display area as 2x3 grid using Canvases."""
         # Row 1: Golden and Original Test
         row1 = ttk.Frame(parent)
         row1.pack(fill=tk.BOTH, expand=True, pady=2)
@@ -799,15 +593,17 @@ Combined from Modular_inspection_1 + modular_inspection2
         golden_frame = ttk.Frame(row1)
         golden_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
         ttk.Label(golden_frame, text="GOLDEN", font=('Consolas', 8)).pack()
-        self.golden_label = tk.Label(golden_frame, bg="#111111")
-        self.golden_label.pack(fill=tk.BOTH, expand=True)
+        self.golden_canvas = tk.Canvas(golden_frame, bg="#111111", highlightthickness=0)
+        self.golden_canvas.pack(fill=tk.BOTH, expand=True)
+        self._bind_canvas_events(self.golden_canvas)
         
         # Sample/Test image (1,2)
         test_frame = ttk.Frame(row1)
         test_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
         ttk.Label(test_frame, text="SAMPLE", font=('Consolas', 8)).pack()
-        self.test_label = tk.Label(test_frame, bg="#111111")
-        self.test_label.pack(fill=tk.BOTH, expand=True)
+        self.test_canvas = tk.Canvas(test_frame, bg="#111111", highlightthickness=0)
+        self.test_canvas.pack(fill=tk.BOTH, expand=True)
+        self._bind_canvas_events(self.test_canvas)
         
         # Row 2: Aligned and Anomaly Heatmap (center)
         row2 = ttk.Frame(parent)
@@ -817,19 +613,20 @@ Combined from Modular_inspection_1 + modular_inspection2
         aligned_frame = ttk.Frame(row2)
         aligned_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
         ttk.Label(aligned_frame, text="ALIGNED", font=('Consolas', 8)).pack()
-        self.aligned_label = tk.Label(aligned_frame, bg="#111111")
-        self.aligned_label.pack(fill=tk.BOTH, expand=True)
+        self.aligned_canvas = tk.Canvas(aligned_frame, bg="#111111", highlightthickness=0)
+        self.aligned_canvas.pack(fill=tk.BOTH, expand=True)
+        self._bind_canvas_events(self.aligned_canvas)
         
-        # ANOMALY HEATMAP (2,2) - Center Right Position
+        # ANOMALY HEATMAP (2,2)
         anomaly_frame = ttk.Frame(row2)
         anomaly_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
         anomaly_title = tk.Label(anomaly_frame, text="⚠ ANOMALY ⚠",
                                 font=(self.FONT_FACE, 8, 'bold'),
                                 bg=self.BG_COLOR, fg="#FF4444")
         anomaly_title.pack()
-        self.pixel_label = tk.Label(anomaly_frame, bg="#111111",
-                                   highlightbackground="#FF4444", highlightthickness=1)
-        self.pixel_label.pack(fill=tk.BOTH, expand=True)
+        self.pixel_canvas = tk.Canvas(anomaly_frame, bg="#111111", highlightthickness=1, highlightbackground="#FF4444")
+        self.pixel_canvas.pack(fill=tk.BOTH, expand=True)
+        self._bind_canvas_events(self.pixel_canvas)
         
         # Row 3: SSIM and Contour Map
         row3 = ttk.Frame(parent)
@@ -839,23 +636,38 @@ Combined from Modular_inspection_1 + modular_inspection2
         ssim_frame = ttk.Frame(row3)
         ssim_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
         ttk.Label(ssim_frame, text="SSIM", font=('Consolas', 8)).pack()
-        self.ssim_label = tk.Label(ssim_frame, bg="#111111")
-        self.ssim_label.pack(fill=tk.BOTH, expand=True)
+        self.ssim_canvas = tk.Canvas(ssim_frame, bg="#111111", highlightthickness=0)
+        self.ssim_canvas.pack(fill=tk.BOTH, expand=True)
+        self._bind_canvas_events(self.ssim_canvas)
         
         # Contour Map (3,2)
         contour_frame = ttk.Frame(row3)
         contour_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
         ttk.Label(contour_frame, text="CONTOUR", font=('Consolas', 8)).pack()
-        self.contour_label = tk.Label(contour_frame, bg="#111111")
-        self.contour_label.pack(fill=tk.BOTH, expand=True)
+        self.contour_canvas = tk.Canvas(contour_frame, bg="#111111", highlightthickness=0)
+        self.contour_canvas.pack(fill=tk.BOTH, expand=True)
+        self._bind_canvas_events(self.contour_canvas)
+
+    def _bind_canvas_events(self, canvas):
+        canvas.bind("<Motion>", self._on_mouse_move)
+        canvas.bind("<Leave>", self._on_mouse_leave)
     
     def _build_status_bar(self):
-        """Build status bar at bottom."""
+        # Stats display
         self.status_var = tk.StringVar(value="Ready")
-        status_bar = tk.Label(self, textvariable=self.status_var,
-                             bg="#222222", fg=self.FG_COLOR,
-                             font=(self.FONT_FACE, 9), anchor=tk.W)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        status_frame = tk.Frame(self, bg="#222222")
+        status_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        status_label = tk.Label(status_frame, textvariable=self.status_var,
+                              bg="#222222", fg=self.FG_COLOR,
+                              font=(self.FONT_FACE, 9), anchor=tk.W)
+        status_label.pack(side=tk.LEFT, padx=5)
+        
+        self.lbl_coords = tk.Label(status_frame, text="XY: -",
+                                 bg="#222222", fg="#00FFFF",
+                                 font=(self.FONT_FACE, 9, 'bold'))
+        self.lbl_coords.pack(side=tk.RIGHT, padx=10)
     
     # === EVENT HANDLERS ===
     
@@ -959,7 +771,7 @@ Combined from Modular_inspection_1 + modular_inspection2
                 self._golden_loaded = True
                 self.last_golden_path = path
                 self.golden_status.config(text=os.path.basename(path), foreground=self.FG_COLOR)
-                self._display_image(self.golden_image, self.golden_label)
+                self._display_on_canvas(self.golden_image, self.golden_canvas)
                 self.status_var.set(f"Loaded golden: {os.path.basename(path)}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load image: {e}")
@@ -976,7 +788,7 @@ Combined from Modular_inspection_1 + modular_inspection2
                 self._test_loaded = True
                 self.last_test_path = path
                 self.test_status.config(text=os.path.basename(path), foreground=self.FG_COLOR)
-                self._display_image(self.test_image, self.test_label)  # Show test image immediately
+                self._display_on_canvas(self.test_image, self.test_canvas)  # Show test image immediately
                 self.status_var.set(f"Loaded test: {os.path.basename(path)}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load image: {e}")
@@ -1034,14 +846,14 @@ Combined from Modular_inspection_1 + modular_inspection2
                 self.status_var.set("Alignment failed - low confidence")
                 return
             
-            self._display_image(aligned, self.aligned_label)
+            self._display_on_canvas(aligned, self.aligned_canvas)
             
             # SSIM check
             self.status_var.set("Running SSIM check...")
             self.update_idletasks()
             
             self.ssim_score, ssim_heatmap = calc_ssim(golden_proc, aligned)
-            self._display_image(ssim_heatmap, self.ssim_label)
+            self._display_on_canvas(ssim_heatmap, self.ssim_canvas)
             
             if self.ssim_score > self.SSIM_PASS_THRESHOLD:
                 # SSIM pass
@@ -1066,7 +878,7 @@ Combined from Modular_inspection_1 + modular_inspection2
                 # Clear pixel heatmap
                 blank = np.zeros((100, 100, 3), dtype=np.uint8)
                 cv2.putText(blank, "N/A", (30, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-                self._display_image(blank, self.pixel_label)
+                self._display_on_canvas(blank, self.pixel_canvas)
                 return
             
             self.status_var.set("Running analysis...")
@@ -1158,8 +970,8 @@ Combined from Modular_inspection_1 + modular_inspection2
             else:
                 contour_map = pixel_result['contour_map']
             
-            self._display_image(pixel_result['heatmap'], self.pixel_label)
-            self._display_image(contour_map, self.contour_label)  # Display contour map in dedicated panel
+            self._display_on_canvas(pixel_result['heatmap'], self.pixel_canvas)
+            self._display_on_canvas(contour_map, self.contour_canvas)  # Display contour map in dedicated panel
             
             # Final result
             processing_time = time.time() - start_time
@@ -1216,8 +1028,8 @@ Combined from Modular_inspection_1 + modular_inspection2
             self.status_var.set(f"Error: {str(e)}")
             messagebox.showerror("Inspection Error", str(e))
     
-    def _display_image(self, cv2_image: np.ndarray, label: tk.Label, size=(450, 350)):
-        """Display OpenCV image in tkinter label."""
+    def _display_on_canvas(self, cv2_image: np.ndarray, canvas: tk.Canvas, size=(450, 350)):
+        """Display OpenCV image on tkinter Canvas with centering and metadata storage."""
         if cv2_image is None or cv2_image.size == 0:
             return
         
@@ -1225,12 +1037,21 @@ Combined from Modular_inspection_1 + modular_inspection2
         if h == 0 or w == 0:
             return
         
+        # 1. Calculate Resize Ratio
+        # Canvas size might change, but let's assume fixed size passed or check widget size?
+        # Better to check widget size if mapped, else use default 'size' param
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        if cw > 10 and ch > 10:
+            size = (cw, ch)
+
         ratio = min(size[0]/w, size[1]/h)
         new_w, new_h = int(w * ratio), int(h * ratio)
         
-        if new_w == 0 or new_h == 0:
+        if new_w <= 0 or new_h <= 0:
             return
         
+        # 2. Resize
         img_resized = cv2.resize(cv2_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
         
         if len(img_resized.shape) == 2:
@@ -1239,8 +1060,80 @@ Combined from Modular_inspection_1 + modular_inspection2
         img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
         photo = ImageTk.PhotoImage(image=Image.fromarray(img_rgb))
         
-        label.config(image=photo)
-        label.image = photo
+        # 3. Calculate Offsets to Center
+        off_x = (size[0] - new_w) // 2
+        off_y = (size[1] - new_h) // 2
+        
+        # 4. Draw on Canvas
+        canvas.delete("all") # Clear previous
+        canvas.create_image(off_x + new_w//2, off_y + new_h//2, image=photo, anchor="center", tags="img")
+        canvas.image = photo # Keep reference
+        
+        # 5. Store Metadata
+        self.canvas_meta[canvas] = {
+            "ratio": ratio,
+            "off_x": off_x,
+            "off_y": off_y,
+            "orig_w": w,
+            "orig_h": h,
+            "disp_w": new_w,
+            "disp_h": new_h
+        }
+
+    def _on_mouse_move(self, event):
+        """Handle mouse movement on canvases to update coordinates and crosshairs."""
+        canvas = event.widget
+        if canvas not in self.canvas_meta:
+            return
+            
+        meta = self.canvas_meta[canvas]
+        
+        # Get mouse pos relative to canvas
+        mx, my = event.x, event.y
+        
+        # Convert to Image Coords
+        # 1. Remove offset
+        img_x = mx - meta["off_x"]
+        img_y = my - meta["off_y"]
+        
+        # 2. Check bounds relative to displayed image
+        if 0 <= img_x < meta["disp_w"] and 0 <= img_y < meta["disp_h"]:
+             # 3. Scale back to original
+            orig_x = int(img_x / meta["ratio"])
+            orig_y = int(img_y / meta["ratio"])
+            
+            # Clamp
+            orig_x = max(0, min(orig_x, meta["orig_w"] - 1))
+            orig_y = max(0, min(orig_y, meta["orig_h"] - 1))
+            
+            self.lbl_coords.config(text=f"XY: {orig_x}, {orig_y}")
+            
+            # Draw Crosshair on THIS canvas
+            self._draw_crosshair(canvas, mx, my)
+            
+            # OPTIONAL: Sync crosshairs on other canvases if they have same dimensions?
+            # For now, just show on active canvas to avoid confusion with different sizes
+        else:
+            self.lbl_coords.config(text="XY: -")
+            canvas.delete("crosshair")
+
+    def _on_mouse_leave(self, event):
+        """Clear coordinates and crosshair when leaving canvas."""
+        self.lbl_coords.config(text="XY: -")
+        event.widget.delete("crosshair")
+
+    def _draw_crosshair(self, canvas, x, y):
+        """Draw simple crosshair on canvas."""
+        canvas.delete("crosshair")
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+        
+        color = "#00FFFF" # Cyan
+        
+        # Horizontal
+        canvas.create_line(0, y, w, y, fill=color, dash=(4, 2), tags="crosshair")
+        # Vertical
+        canvas.create_line(x, 0, x, h, fill=color, dash=(4, 2), tags="crosshair")
     
     def _log_result(self, test_path, verdict, p_score, p_count, p_verdict, p_time, ssim_score):
         """Log inspection result to CSV."""
@@ -1713,8 +1606,8 @@ class GoldPadExtractorWindow(tk.Toplevel):
         tools_menu.add_command(label="📄 Open Log File", command=lambda: self.parent._open_log_file())
     
     def _go_home(self):
-        """Bring main Inspector window to front."""
-        self.parent._show_home()
+        """Close this tool window and return focus to main."""
+        self.destroy()
     
     def _build_ui(self):
         """Build the Gold Pad Extractor UI."""
@@ -2788,33 +2681,32 @@ class PresetConfigWindow(tk.Toplevel):
 # SIMPLE DEFECT DETECTION WINDOW
 # ==============================================================================
 
-class SimpleDefectDetectionWindow(tk.Toplevel):
-    """Simple Defect Detection - Binary thresholding with Otsu auto-threshold for batch processing.
+class InspectorApp(tk.Tk):
+    """Integrated PCB Inspector (based on Simple Defect Detection)."""
     
-    Ported from pad_binary_gui.py with bulk processing support.
-    """
+
     
     BG_COLOR = "#000000"
     FG_COLOR = "#00FFFF"  # Cyan
     ACCENT_COLOR = "#00FFFF"
     FONT_FACE = "Consolas"
     
-    # Preset Definitions
+    # Preset Definitions (now includes noise and defect_pct)
     DEFECT_PRESETS = {
-        "General":   {"sigma": 1.2, "thresh": 0.65, "block": 11, "c": 2},
-        "Scratches": {"sigma": 0.8, "thresh": 0.60, "block": 7,  "c": 2},
-        "Stains":    {"sigma": 2.0, "thresh": 0.70, "block": 25, "c": 4},
-        "Pinholes":  {"sigma": 0.8, "thresh": 0.60, "block": 9,  "c": 5}
+        "General":   {"sigma": 1.2, "thresh": 0.65, "block": 11, "c": 2, "noise": 3, "defect_pct": 10.0},
+        "Scratches": {"sigma": 0.8, "thresh": 0.60, "block": 7,  "c": 2, "noise": 2, "defect_pct": 5.0},
+        "Stains":    {"sigma": 2.0, "thresh": 0.70, "block": 25, "c": 4, "noise": 4, "defect_pct": 15.0},
+        "Pinholes":  {"sigma": 0.8, "thresh": 0.60, "block": 9,  "c": 5, "noise": 2, "defect_pct": 3.0}
     }
     
     SUPPORTED_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".bitmap", ".dib")
     
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.parent = parent
+    def __init__(self):
+        super().__init__()
         
-        self.title("Simple Defect Detection")
-        self.geometry("1300x850")
+        self.title("Integrated PCB Inspector")
+        self.geometry("1600x1000")
+        self.state('zoomed')
         self.configure(bg=self.BG_COLOR)
         
         # State
@@ -2827,8 +2719,15 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
         self.adaptive_block_size = tk.IntVar(value=11)  # Block size for adaptive
         self.adaptive_c = tk.IntVar(value=2)  # C constant for adaptive
         self.black_defect_pct = tk.DoubleVar(value=10.0)
+        self.noise_level = tk.IntVar(value=3)  # Morphological noise reduction (0-10)
         
-        self.files = []
+        # New Feature State
+        self.filter_method = tk.StringVar(value="Gaussian")
+        self.use_clahe = tk.BooleanVar(value=False)
+        self.show_overlay = tk.BooleanVar(value=True)
+        self.show_auto_in_list = tk.BooleanVar(value=False)
+        self.auto_defects = []
+        self.manual_labels = []
         self.idx = 0
         self.results = []  # Batch results
         
@@ -2836,32 +2735,111 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
         self.current_alpha = None
         self.current_bw = None
         
+        # Canvas metadata for coordinate tracking: {canvas: (ratio, off_x, off_y, orig_w, orig_h)}
+        self.canvas_meta = {}
+        
+        self.tool_windows = {} # Track open tool windows
+        self.session_file = "inspector_session.json"
+        
+        self._setup_styles()
         self._build_menu()
         self._build_ui()
+    
+    def _setup_styles(self):
+        """Configure ttk styles for the application."""
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        # Base styles
+        style.configure("TLabel", background=self.BG_COLOR, foreground=self.FG_COLOR,
+                       font=(self.FONT_FACE, 10))
+        style.configure("TButton", background="#333333", foreground=self.FG_COLOR,
+                       font=(self.FONT_FACE, 10, 'bold'))
+        style.configure("TFrame", background=self.BG_COLOR)
+        style.configure("TCheckbutton", background=self.BG_COLOR, foreground=self.FG_COLOR)
+        
+        # Blue (Cyan) button style for folder selection
+        style.configure("Blue.TButton", 
+                       background="#0088AA", foreground="#FFFFFF",
+                       font=(self.FONT_FACE, 10, 'bold'))
+        style.map("Blue.TButton",
+                 background=[("active", "#00AACC"), ("pressed", "#006688")])
     
     def _build_menu(self):
         """Build menu bar with navigation."""
         menubar = tk.Menu(self)
         self.config(menu=menubar)
         
-        # Navigate menu
-        nav_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Navigate", menu=nav_menu)
-        nav_menu.add_command(label="🏠 Home (Inspector)", command=self._go_home)
-        nav_menu.add_separator()
-        nav_menu.add_command(label="✕ Close Window", command=self.destroy)
-        
         # Tools menu
         tools_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Tools", menu=tools_menu)
-        tools_menu.add_command(label="🔲 QR Code Extractor", command=lambda: self.parent._open_qr_cropper())
-        tools_menu.add_command(label="🔶 Gold Pad Extractor", command=lambda: self.parent._open_gold_pad_extractor())
-        tools_menu.add_command(label="🔴 Red Pad Extractor", command=lambda: self.parent._open_red_pad_extractor())
-        tools_menu.add_command(label="🔍 Simple Defect Detection", command=lambda: self.lift())
+        tools_menu.add_command(label="📊 Pixel Inspection (Hiatus)", command=self._open_pixel_inspection_window)
         tools_menu.add_separator()
-        tools_menu.add_command(label="📦 Batch Inspection", command=lambda: self.parent._run_batch_inspection())
+        tools_menu.add_command(label="🔲 QR Code Extractor", command=self._open_qr_cropper)
+        tools_menu.add_command(label="🔶 Gold Pad Extractor", command=self._open_gold_pad_extractor)
+        tools_menu.add_command(label="🔴 Red Pad Extractor", command=self._open_red_pad_extractor)
         tools_menu.add_separator()
-        tools_menu.add_command(label="📄 Open Log File", command=lambda: self.parent._open_log_file())
+        tools_menu.add_command(label="📄 Open Log File", command=self._open_log_file)
+        
+        # Help menu
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="About", command=self._show_about)
+
+    def _open_tool_window(self, name: str, WindowClass):
+        """Open or focus a tool window (singleton pattern)."""
+        if name in self.tool_windows:
+            win = self.tool_windows[name]
+            if win.winfo_exists():
+                win.deiconify()
+                win.lift()
+                win.focus_force()
+                return win
+            else:
+                del self.tool_windows[name]
+        
+        win = WindowClass(self)
+        self.tool_windows[name] = win
+        win.protocol("WM_DELETE_WINDOW", lambda: self._on_tool_close(name))
+        return win
+    
+    def _on_tool_close(self, name):
+        """Handle tool window closure."""
+        if name in self.tool_windows:
+            win = self.tool_windows[name]
+            win.destroy()
+            del self.tool_windows[name]
+            
+    def _open_pixel_inspection_window(self):
+        self._open_tool_window("Pixel Inspection", PixelInspectionWindow)
+
+    def _open_qr_cropper(self):
+        self._open_tool_window("QR Extractor", QRCropperWindow)
+
+    def _open_gold_pad_extractor(self):
+        self._open_tool_window("Gold Pad", GoldPadExtractorWindow)
+
+    def _open_red_pad_extractor(self):
+        self._open_tool_window("Red Pad", RedPadExtractorWindow)
+        
+    def _open_log_file(self):
+        import subprocess
+        log_file = "inspection_log.csv" # Should ideally be shared constant
+        if os.path.exists(log_file):
+            subprocess.run(['explorer', '/select,', os.path.abspath(log_file)])
+            
+    def _show_about(self):
+        messagebox.showinfo("About", "Integrated PCB Inspector\n\nMain: Simple Defect Detection\nTools: Pixel Inspection, QR, etc.")
+        
+    def _on_close(self):
+        """Handle application closure."""
+        # Close all tools
+        for win in list(self.tool_windows.values()):
+            if win.winfo_exists():
+                win.destroy()
+        self.destroy()
+        sys.exit(0)
+
     
     def _go_home(self):
         """Bring main Inspector window to front."""
@@ -2873,7 +2851,8 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         # Left panel - Controls (Scrollable Container)
-        controls_container = tk.Frame(main_frame, bg=self.BG_COLOR, width=330)
+        # Left panel - Controls (Scrollable Container)
+        controls_container = tk.Frame(main_frame, bg=self.BG_COLOR, width=420)
         controls_container.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
         controls_container.pack_propagate(False)
 
@@ -2918,12 +2897,12 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
         
         ttk.Label(folder_frame, text="< FOLDERS >", foreground=self.ACCENT_COLOR).pack(pady=5)
         
-        ttk.Button(folder_frame, text="Select Input Folder",
+        ttk.Button(folder_frame, text="Select Input Folder", style="Blue.TButton",
                   command=self._select_input).pack(fill=tk.X, padx=5, pady=2)
         self.input_label = ttk.Label(folder_frame, text="Not selected", foreground="#888888")
         self.input_label.pack(pady=(0, 5))
         
-        ttk.Button(folder_frame, text="Select Output Folder",
+        ttk.Button(folder_frame, text="Select Output Folder", style="Blue.TButton",
                   command=self._select_output).pack(fill=tk.X, padx=5, pady=2)
         self.output_label = ttk.Label(folder_frame, text="Auto (input/BW_out)", foreground="#888888")
         self.output_label.pack(pady=(0, 5))
@@ -2960,7 +2939,7 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
         # Auto Otsu checkbox
         otsu_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
         otsu_row.pack(fill=tk.X, padx=5, pady=3)
-        self.otsu_check = ttk.Checkbutton(otsu_row, text="🔄 Auto (Otsu) - Global threshold",
+        self.otsu_check = ttk.Checkbutton(otsu_row, text="🔄 Auto (Triangle) - Global threshold",
                                           variable=self.use_otsu, command=self._on_threshold_mode_change)
         self.otsu_check.pack(anchor=tk.W)
         
@@ -2993,6 +2972,20 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
         self.c_label = ttk.Label(c_row, text="2", width=4)
         self.c_label.pack(side=tk.LEFT)
         
+        # Filter and CLAHE
+        filter_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
+        filter_row.pack(fill=tk.X, padx=5, pady=2)
+        
+        ttk.Label(filter_row, text="Filter:", width=10).pack(side=tk.LEFT)
+        filter_cb = ttk.Combobox(filter_row, textvariable=self.filter_method, 
+                             values=["Gaussian", "Bilateral", "Median", "None"], 
+                             state="readonly", width=10)
+        filter_cb.pack(side=tk.LEFT, padx=(0, 5))
+        filter_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_preview())
+        
+        ttk.Checkbutton(filter_row, text="CLAHE", variable=self.use_clahe, 
+                       command=self._refresh_preview).pack(side=tk.LEFT)
+
         # Sigma slider
         sigma_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
         sigma_row.pack(fill=tk.X, padx=5, pady=2)
@@ -3012,17 +3005,73 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
         self.thresh_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.thresh_label = ttk.Label(thresh_row, text="0.65", width=5)
         self.thresh_label.pack(side=tk.LEFT)
+
+        # Noise Reduction slider
+        noise_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
+        noise_row.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(noise_row, text="Stabilization:", width=12).pack(side=tk.LEFT)
+        self.noise_scale = ttk.Scale(noise_row, from_=0, to=10, variable=self.noise_level,
+                                     command=self._on_manual_change)
+        self.noise_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.noise_label = ttk.Label(noise_row, textvariable=self.noise_level, width=3)
+        self.noise_label.pack(side=tk.LEFT)
+        
+        
+        
+        # [NEW] Color Filter Frame (Collapsible)
+        self.color_frame = tk.Frame(controls_frame, bg=self.BG_COLOR,
+                                   highlightbackground=self.FG_COLOR, highlightthickness=1)
+        self.color_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Header with Checkbox to Enable
+        header_frame = tk.Frame(self.color_frame, bg=self.BG_COLOR)
+        header_frame.pack(fill=tk.X, padx=2, pady=2)
+        
+        self.use_hsv = tk.BooleanVar(value=False)
+        cb_hsv = ttk.Checkbutton(header_frame, text="COLOR FILTER (Gold Focus)", 
+                                variable=self.use_hsv, command=self._on_hsv_toggle)
+        cb_hsv.pack(side=tk.LEFT)
+        
+        # Preview Mask Button (small)
+        self.btn_mask = tk.Button(header_frame, text="👁 Mask", 
+                                 bg="#333333", fg="cyan", font=("Consolas", 8),
+                                 command=self._preview_mask_only)
+        self.btn_mask.pack(side=tk.RIGHT, padx=2)
+
+        # Sliders container (Hidden by default until enabled)
+        self.hsv_controls = tk.Frame(self.color_frame, bg=self.BG_COLOR)
+        
+        # Hue
+        self.hue_min = tk.IntVar(value=10)
+        self.hue_max = tk.IntVar(value=40)
+        self._add_hsv_slider(self.hsv_controls, "Hue Min", self.hue_min, 0, 179)
+        self._add_hsv_slider(self.hsv_controls, "Hue Max", self.hue_max, 0, 179)
+        
+        # Saturation
+        self.sat_min = tk.IntVar(value=50)
+        self.sat_max = tk.IntVar(value=255)
+        self._add_hsv_slider(self.hsv_controls, "Sat Min", self.sat_min, 0, 255)
+        
+        # Value
+        self.val_min = tk.IntVar(value=50)
+        self.val_max = tk.IntVar(value=255)
+        self._add_hsv_slider(self.hsv_controls, "Val Min", self.val_min, 0, 255)
+        
+        if self.use_hsv.get():
+            self.hsv_controls.pack(fill=tk.X, padx=2)
         
         # Black% defect threshold
+
         defect_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
         defect_row.pack(fill=tk.X, padx=5, pady=2)
         ttk.Label(defect_row, text="DEFECT if black% >").pack(side=tk.LEFT)
-        ttk.Spinbox(defect_row, from_=0.0, to=100.0, increment=0.5,
-                   textvariable=self.black_defect_pct, width=7).pack(side=tk.LEFT, padx=5)
+        self.defect_spin = ttk.Spinbox(defect_row, from_=0.0, to=100.0, increment=0.5,
+                   textvariable=self.black_defect_pct, width=7)
+        self.defect_spin.pack(side=tk.LEFT, padx=5)
         ttk.Label(defect_row, text="%").pack(side=tk.LEFT)
         
-        # Apply initial state
-        self._on_threshold_mode_change()
+        # Apply initial state - MOVED TO END OF METHOD TO FIX CRASH
+        # self._on_threshold_mode_change()
         
         # Navigation
         nav_frame = tk.Frame(controls_frame, bg=self.BG_COLOR,
@@ -3055,20 +3104,60 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
                                 command=self._open_overview)
         overview_btn.pack(fill=tk.X, pady=3)
         
-        # Results info
-        result_frame = tk.Frame(controls_frame, bg=self.BG_COLOR,
-                               highlightbackground=self.FG_COLOR, highlightthickness=1)
-        result_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Labeling and Visualization
+        vis_frame = tk.Frame(controls_frame, bg=self.BG_COLOR,
+                            highlightbackground=self.FG_COLOR, highlightthickness=1)
+        vis_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        ttk.Label(result_frame, text="< RESULTS >", foreground=self.ACCENT_COLOR).pack(pady=5)
+        ttk.Label(vis_frame, text="< RESULTS & LABELS >", foreground=self.ACCENT_COLOR).pack(pady=5)
         
-        self.result_label = tk.Label(result_frame, text="--", 
+        # Result Verdict
+        self.result_label = tk.Label(vis_frame, text="--", 
                                     font=(self.FONT_FACE, 14, 'bold'),
                                     bg=self.BG_COLOR, fg="#888888")
         self.result_label.pack(pady=5)
         
-        self.stats_text = tk.Text(result_frame, bg="#111111", fg=self.FG_COLOR,
-                                 font=(self.FONT_FACE, 9), height=8, width=35)
+        # Labeling Buttons
+        lbl_btn_row = tk.Frame(vis_frame, bg=self.BG_COLOR)
+        lbl_btn_row.pack(fill=tk.X, padx=5)
+        
+        tk.Button(lbl_btn_row, text="🏷 Open Labeler", bg="#003300", fg="#00FF00",
+                 command=self._open_labeler).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        
+        vis_chk_row = tk.Frame(vis_frame, bg=self.BG_COLOR)
+        vis_chk_row.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Checkbutton(vis_chk_row, text="Show Boxes", variable=self.show_overlay, 
+                       command=self._refresh_visualization).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(vis_chk_row, text="List Auto", variable=self.show_auto_in_list, 
+                       command=self._refresh_visualization).pack(side=tk.LEFT, padx=2)
+        
+        # Treeview for defects
+        tree_frame = ttk.Frame(vis_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        columns = ("ID", "Type", "Area")
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=8)
+        self.tree.heading("ID", text="ID"); self.tree.column("ID", width=40)
+        self.tree.heading("Type", text="Type"); self.tree.column("Type", width=80)
+        self.tree.heading("Area", text="Area"); self.tree.column("Area", width=60)
+        
+        vbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vbar.set)
+        vbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Delete Button (User Request)
+        tk.Button(vis_frame, text="Remove Selected Label", bg="#440000", fg="#FF0000",
+                 command=self._remove_selected_label).pack(fill=tk.X, padx=5, pady=2)
+        
+        # Right Click Menu
+        self.tree_menu = tk.Menu(self, tearoff=0)
+        self.tree_menu.add_command(label="Remove Label", command=self._remove_selected_label)
+        self.tree.bind("<Button-3>", lambda event: self.tree_menu.post(event.x_root, event.y_root))
+        
+        # Stats Text (Restored)
+        self.stats_text = tk.Text(vis_frame, bg="#111111", fg=self.FG_COLOR,
+                                 font=(self.FONT_FACE, 9), height=6, width=35)
         self.stats_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Right panel - Image display
@@ -3079,23 +3168,57 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
         orig_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
         orig_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
         ttk.Label(orig_frame, text="ORIGINAL").pack()
-        self.orig_label = tk.Label(orig_frame, bg="#111111")
-        self.orig_label.pack(fill=tk.BOTH, expand=True)
+        self.orig_canvas = tk.Canvas(orig_frame, bg="#111111", highlightthickness=0)
+        self.orig_canvas.pack(fill=tk.BOTH, expand=True)
+        self.orig_canvas.bind("<Motion>", self._on_mouse_move)
+        self.orig_canvas.bind("<Leave>", self._on_mouse_leave)
         
         # Binary image
         bw_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
         bw_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
         ttk.Label(bw_frame, text="BINARY").pack()
-        self.bw_label = tk.Label(bw_frame, bg="#111111")
-        self.bw_label.pack(fill=tk.BOTH, expand=True)
+        self.bw_canvas = tk.Canvas(bw_frame, bg="#111111", highlightthickness=0)
+        self.bw_canvas.pack(fill=tk.BOTH, expand=True)
+        self.bw_canvas.bind("<Motion>", self._on_mouse_move)
+        self.bw_canvas.bind("<Leave>", self._on_mouse_leave)
         
         # Status bar
         self.status_var = tk.StringVar(value="Ready - Select input folder to begin")
-        status_bar = tk.Label(self, textvariable=self.status_var, 
+        
+        status_frame = tk.Frame(self, bg="#222222")
+        status_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        status_bar = tk.Label(status_frame, textvariable=self.status_var, 
                              bg="#222222", fg=self.FG_COLOR,
                              font=(self.FONT_FACE, 9), anchor=tk.W)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        status_bar.pack(side=tk.LEFT, padx=5)
+        
+        self.lbl_coords = tk.Label(status_frame, text="XY: -", 
+                                  bg="#222222", fg="#FFFFFF",
+                                  font=(self.FONT_FACE, 9))
+        self.lbl_coords.pack(side=tk.RIGHT, padx=10)
+        
+        self._add_tooltips()
+
+        # [Moved to end] Apply initial state after all widgets are created
+        self._on_threshold_mode_change()
     
+    def _add_tooltips(self):
+        """Add tooltips to controls."""
+        try:
+            ToolTip(self.input_label, "Select folder containing images to inspect")
+            ToolTip(self.otsu_check, "Automatically calculate global threshold using Otsu's method")
+            ToolTip(self.adaptive_check, "Use local adaptive thresholding (better for uneven lighting)")
+            ToolTip(self.block_scale, "Size of the local neighborhood for adaptive thresholding")
+            ToolTip(self.c_scale, "Constant subtracted from the mean (Adaptive C)")
+            ToolTip(self.sigma_scale, "Gaussian blur strength (Sigma) to reduce noise before thresholding")
+            ToolTip(self.thresh_scale, "Manual global threshold value (0.0 - 1.0)")
+            ToolTip(self.noise_scale, "Morphological Open/Close operations to remove small noise and fill gaps")
+            ToolTip(self.preset_combo, "Quickly select parameter presets for different defect types")
+            ToolTip(self.defect_spin, "Threshold percentage of black pixels to consider an image defective")
+        except Exception as e:
+            print(f"Error adding tooltips: {e}")
+
     def _on_frame_configure(self, event):
         """Update scroll region when content changes."""
         self.controls_canvas.configure(scrollregion=self.controls_canvas.bbox("all"))
@@ -3107,6 +3230,59 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
     def _on_mousewheel(self, event):
         """Handle mousewheel scrolling."""
         self.controls_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
+    def _add_hsv_slider(self, parent, label, variable, from_, to):
+        """Add compact HSV slider."""
+        row = tk.Frame(parent, bg=self.BG_COLOR)
+        row.pack(fill=tk.X, padx=2, pady=1)
+        tk.Label(row, text=label, width=8, bg=self.BG_COLOR, fg="white", font=("Consolas", 8)).pack(side=tk.LEFT)
+        s = ttk.Scale(row, from_=from_, to=to, variable=variable, orient=tk.HORIZONTAL, command=self._on_hsv_change)
+        s.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        l = ttk.Label(row, textvariable=variable, width=4, font=("Consolas", 8))
+        l.pack(side=tk.LEFT)
+
+    def _on_hsv_toggle(self):
+        """Show/Hide HSV controls."""
+        if self.use_hsv.get():
+            self.hsv_controls.pack(fill=tk.X, padx=2)
+        else:
+            self.hsv_controls.pack_forget()
+        self._refresh_preview()
+
+    def _on_hsv_change(self, val):
+        """Live update when sliding."""
+        self._refresh_preview()
+
+    def _preview_mask_only(self):
+        """Show JUST the Gold Mask in the preview window for tuning."""
+        if self.current_image is None: return
+        
+        hsv_mask = self._get_hsv_mask(self.current_image)
+        
+        # Show in Preview Canvas (Original side) temporarily
+        self._display_on_canvas(hsv_mask, self.orig_canvas, is_gray=True)
+        self.status_var.set("Showing HSV Mask (White = Keep, Black = Ignore). Move sliders to tune.")
+
+    def _get_hsv_mask(self, rgb_img):
+        """Compute the HSV mask based on current sliders."""
+        # Convert RGB to BGR for OpenCV (if needed) or directly to HSV
+        # Note: self.current_image is RGB from _read_image_with_alpha usually
+        # But cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV) works too.
+        
+        hsv = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2HSV)
+        
+        lower = np.array([self.hue_min.get(), self.sat_min.get(), self.val_min.get()])
+        upper = np.array([self.hue_max.get(), self.sat_max.get(), self.val_max.get()])
+        
+        mask = cv2.inRange(hsv, lower, upper)
+        
+        # Optional cleanup
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        
+        return mask
+
 
     
     # === UTILITY FUNCTIONS (from pad_binary_gui.py) ===
@@ -3223,63 +3399,165 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
         return round(sigma, 2)
     
     def _make_binary(self, rgb, alpha, sigma=1.2, thresh=0.65, use_otsu=False, 
-                      use_adaptive=False, block_size=11, c_value=2):
-        """RGB -> Gray -> masked Gaussian -> Threshold -> BW.
+                      use_adaptive=False, block_size=11, c_value=2, noise_level=0,
+                      use_hsv=False):
+        """RGB -> Gray -> Filter (Gaussian/Bilateral/Median) -> Threshold -> BW."""
         
-        Supports three modes:
-        - Manual: Uses provided sigma and thresh
-        - Otsu: Auto-computes global threshold using Otsu's method
-        - Adaptive: Uses local adaptive thresholding for varying illumination
-        """
-        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+        # 0. HSV Masking (Gold Focus)
+        # If enabled, we create a mask of "valid" areas (Gold) and "invalid" (Green Background)
+        # We will use this to zero out the background AFTER thresholding.
+        gold_mask = None
+        if use_hsv:
+            # We need to call generic helper or reimplement
+            # Since _get_hsv_mask is instance method, we can't call it if this is static
+            # But this is an instance method, so we can!
+            # BUT: _make_binary is called by _quick_process/batch which might NOT be on 'self' context cleanly
+            # Wait, it IS an instance method.
+            gold_mask = self._get_hsv_mask(rgb)
+
+        # 1. Grayscale
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         
+        # 2. CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        if self.use_clahe.get():
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            gray = clahe.apply(gray)
+            
+        gray_f = gray.astype(np.float32) / 255.0
+        
+        # 3. Mask creation
         if alpha is not None:
             mask_bool = alpha > 0
         else:
             mask_bool = np.ones_like(gray, dtype=bool)
-        
         mask01 = mask_bool.astype(np.float32)
-        gray_u8 = np.clip(gray * 255.0, 0, 255).astype(np.uint8)
+        gray_u8 = np.clip(gray_f * 255.0, 0, 255).astype(np.uint8)
+        
+        # 4. Smoothing / Filtering
+        f_method = self.filter_method.get()
+        if f_method == "Gaussian":
+            smooth_f = masked_gaussian_smooth(gray_f, mask01, float(sigma))
+        elif f_method == "Bilateral":
+            smooth_f = masked_bilateral_smooth(gray_f, mask01, float(sigma))
+        elif f_method == "Median":
+            k = int(float(sigma) * 3)
+            if k % 2 == 0: k += 1
+            smooth_f = masked_median_smooth(gray_f, mask01, kernel_size=k)
+        else: # None
+            smooth_f = gray_f
+
+        smooth_u8 = np.clip(smooth_f * 255.0, 0, 255).astype(np.uint8)
         
         auto_params = None
         
+        # 5. Thresholding
         if use_adaptive:
-            # Adaptive thresholding - handles varying illumination
-            # Apply Gaussian smoothing first
-            smooth = self._masked_gaussian_smooth(gray, mask01, sigma=float(sigma))
-            smooth_u8 = np.clip(smooth * 255.0, 0, 255).astype(np.uint8)
-            
-            # Ensure block_size is odd
+            # Adaptive thresholding
             block = int(block_size)
-            if block % 2 == 0:
-                block += 1
+            if block % 2 == 0: block += 1
             block = max(3, block)
             
-            # Apply adaptive threshold
             bw = cv2.adaptiveThreshold(
                 smooth_u8, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                 cv2.THRESH_BINARY, block, int(c_value)
             )
             bw[~mask_bool] = 0
-            auto_params = (sigma, f"adaptive(b={block},c={c_value})")
+            
+            # Apply Gold Mask logic:
+            # We want to FIND DEFECTS (white pixels in 'bw')
+            # But ONLY if they are inside the GOLD area (white pixels in 'gold_mask')
+            # Actually, defects are usually "dark" spots on gold.
+            # Local adaptive threshold: finds local variations.
+            # If we mask out the green background (make it black), adaptive threshold might find edges there.
+            # SO: We should mask the result.
+            
+            auto_params = (sigma, f"adapt({block},{c_value})")
             
         elif use_otsu:
-            sigma = self._compute_auto_sigma(gray_u8, mask_bool)
-            smooth = self._masked_gaussian_smooth(gray, mask01, sigma=float(sigma))
-            smooth_u8 = np.clip(smooth * 255.0, 0, 255).astype(np.uint8)
-            thresh = self._compute_otsu_threshold(smooth_u8, mask_bool)
-            auto_params = (sigma, thresh)
+            # For Otsu, we can use the helper or just standard CV2
+            # Re-using local Otsu logic for consistency with previous implementation
+            masked_pixels = smooth_u8[mask_bool] # Only look at non-transparent pixels
             
-            T = int(np.clip(thresh, 0.0, 1.0) * 255)
-            bw = (smooth_u8 > T).astype(np.uint8) * 255
+            if use_hsv and gold_mask is not None:
+                 # If focusing on gold, only calculate Otsu on the gold pixels!
+                 # This makes thresholding much more accurate for the pads.
+                 gold_pixels = smooth_u8[gold_mask > 0]
+                 if len(gold_pixels) > 0:
+                     masked_pixels = gold_pixels
+
+            if len(masked_pixels) == 0:
+                thresh_val = 128
+            else:
+                # Use TRIANGLE instead of OTSU
+                thresh_val, _ = cv2.threshold(masked_pixels, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_TRIANGLE)
+            
+            # INVERTED Threshold usually finds Dark defects on Light background
+            # If standard THRESH_BINARY: Source > Thresh = 255 (White).
+            # Gold is bright. Defect is Dark.
+            # So Gold > Thresh -> White. Defect < Thresh -> Black.
+            # We want Defect to be White in the final mask.
+            # So we use THRESH_BINARY_INV.
+            # Let's check current logic: `cv2.threshold(..., cv2.THRESH_BINARY)`
+            # This makes bright things white.
+            # The user wants to detect "black marks".
+            # So we want the INVERSE of the bright stuff?
+            # Existing code seems to produce BW image where *something* is white.
+            # Let's stick to the current convention: High=White.
+            # If we want to detect defects, we usually invert at the end or change this.
+            # Assuming existing logic is: White = Defect?
+            # Wait, valid mask logic isn't clear in original snippet.
+            # Let's use standard logic:
+            # If Thresholding finds the "Bright Gold", then "Dark Defect" is the hole in it.
+            # Then we invert.
+            
+            # For now, let's keep the existing flow but enforce the Mask at the end.
+            _, bw = cv2.threshold(smooth_u8, thresh_val, 255, cv2.THRESH_BINARY)
             bw[~mask_bool] = 0
+            auto_params = (sigma, thresh_val / 255.0)
+            
         else:
-            smooth = self._masked_gaussian_smooth(gray, mask01, sigma=float(sigma))
-            smooth_u8 = np.clip(smooth * 255.0, 0, 255).astype(np.uint8)
-            
+            # Manual
             T = int(np.clip(thresh, 0.0, 1.0) * 255)
-            bw = (smooth_u8 > T).astype(np.uint8) * 255
+            _, bw = cv2.threshold(smooth_u8, T, 255, cv2.THRESH_BINARY)
             bw[~mask_bool] = 0
+
+        # [HSV INTEGRATION STEP]
+        # If enabled, we want to IGNORE everything outside the Gold Mask.
+        if use_hsv and gold_mask is not None:
+            # Logic:
+            # The background is Green. The defects are Black spots on Gold.
+            # The Gold is bright.
+            # 'bw' currently has White for Bright things (Gold) and Black for Dark things (Defects + Background).
+            # If we purely AND with gold_mask...
+            # GoldMask = White (255) on Gold, Black (0) on Green.
+            # BW = White on Gold, Black on Defect, Black on Green.
+            # Result = White on Clean Gold, Black on Defect, Black on Green.
+            # This just isolates the gold pad. It doesn't "highlight" the defect.
+            #
+            # User wants: "Defect if black% > X".
+            # So they are measuring the amount of BLACK pixels.
+            # If we allow the Green Background to remain Black, the "Black%" will be huge (failure).
+            # We need the Green Background to be ignored (count as "White" or "Transparent" or "Not Defect").
+            # 
+            # Solution:
+            # We want to measure "Black Spots ON THE GOLD".
+            # We should forcibly set the Background (Non-Gold) pixels to WHITE (Safe) in the binary map.
+            # So that only the ACTUAL defects (dark spots on gold) remain Black.
+            
+            # 1. Invert Gold Mask: White=Background/Green, Black=Gold
+            bg_mask = cv2.bitwise_not(gold_mask)
+            
+            # 2. Set Background pixels in 'bw' to WHITE (255)
+            # This ensures they are not counted as "Defects" (Black pixels).
+            bw = cv2.bitwise_or(bw, bg_mask)
+
+        # 6. Morphological Stabilization
+        if noise_level > 0:
+            k_size = 3 
+            if noise_level >= 5: k_size = 5
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
+            bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
+            bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, kernel)
         
         return gray_u8, smooth_u8, bw, mask_bool, auto_params
     
@@ -3428,6 +3706,7 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
         
         use_otsu = self.use_otsu.get()
         use_adaptive = self.use_adaptive.get()
+        use_hsv = self.use_hsv.get()
         
         result = self._make_binary(
             self.current_image,
@@ -3437,7 +3716,9 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
             use_otsu=use_otsu,
             use_adaptive=use_adaptive,
             block_size=int(self.adaptive_block_size.get()),
-            c_value=int(self.adaptive_c.get())
+            c_value=int(self.adaptive_c.get()),
+            noise_level=int(self.noise_level.get()),
+            use_hsv=use_hsv
         )
         _, _, bw_u8, mask_bool, auto_params = result
         
@@ -3445,63 +3726,135 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
         if use_otsu and auto_params:
             auto_sigma, auto_thresh = auto_params
             self.sigma.set(auto_sigma)
-            self.thresh.set(auto_thresh)
+            if isinstance(auto_thresh, (float, int)):
+                self.thresh.set(auto_thresh)
+                self.thresh_label.configure(text=f"{auto_thresh:.2f}")
             self.sigma_label.configure(text=f"{auto_sigma:.2f}")
-            self.thresh_label.configure(text=f"{auto_thresh:.2f}")
         else:
             self.sigma_label.configure(text=f"{self.sigma.get():.2f}")
             self.thresh_label.configure(text=f"{self.thresh.get():.2f}")
         
-        # Update adaptive labels
         block_val = int(self.adaptive_block_size.get())
-        if block_val % 2 == 0:
-            block_val += 1
+        if block_val % 2 == 0: block_val += 1
         self.block_label.configure(text=str(block_val))
         self.c_label.configure(text=str(int(self.adaptive_c.get())))
         
         self.current_bw = bw_u8
         
+        # Defect Analysis
+        self.auto_defects, _ = analyze_defects(bw_u8, mask_bool)
+        
         # Compute stats
         white_px, black_px, area_px, white_pct, black_pct = self._compute_stats(bw_u8, mask_bool)
         
-        # Determine status
         if black_pct > float(self.black_defect_pct.get()):
             status = "DEFECT"
-            self.result_label.config(text="⚠ DEFECT", fg="#FF4444")
+            self.result_label.config(text=f"⚠ DEFECT ({len(self.auto_defects)})", fg="#FF4444")
         else:
             status = "OK"
-            self.result_label.config(text="✓ OK", fg="#00FF41")
-        
-        # Update displays
-        self._display_image(self.current_image, self.orig_label, is_rgb=True)
-        self._display_image(bw_u8, self.bw_label, is_gray=True)
-        
-        # Update info
+            self.result_label.config(text=f"✓ OK ({len(self.auto_defects)})", fg="#00FF41")
+            
+        # Update Info
         if self.files:
             base = os.path.basename(self.files[self.idx])
             self.nav_info.config(text=f"{self.idx+1}/{len(self.files)}: {base}")
+            
+        # Stats Text
+        mode_str = "Adaptive" if use_adaptive else ("Otsu" if use_otsu else "Manual")
         
-        # Determine mode string for display
-        if use_adaptive:
-            mode_str = f"Adaptive (block={block_val}, C={int(self.adaptive_c.get())})"
-        elif use_otsu:
-            mode_str = "Otsu (auto)"
-        else:
-            mode_str = "Manual"
-        
-        # Update stats
         self.stats_text.delete(1.0, tk.END)
         self.stats_text.insert(tk.END, f"Status: {status}\n")
         self.stats_text.insert(tk.END, f"Mode: {mode_str}\n")
         self.stats_text.insert(tk.END, f"Black: {black_pct:.2f}% ({black_px} px)\n")
         self.stats_text.insert(tk.END, f"White: {white_pct:.2f}% ({white_px} px)\n")
-        self.stats_text.insert(tk.END, f"Total Area: {area_px} px\n")
-        self.stats_text.insert(tk.END, f"\nDefect Threshold: >{self.black_defect_pct.get():.1f}%\n")
-        self.stats_text.insert(tk.END, f"Sigma: {self.sigma.get():.2f}\n")
-        if use_adaptive:
-            self.stats_text.insert(tk.END, f"Block Size: {block_val} | C: {int(self.adaptive_c.get())}")
-        elif not use_otsu:
-            self.stats_text.insert(tk.END, f"Threshold: {self.thresh.get():.2f}")
+        self.stats_text.insert(tk.END, f"Defects: {len(self.auto_defects)}\n")
+        
+        self._display_on_canvas(self.current_image, self.orig_canvas, is_rgb=True)
+        self._refresh_visualization()
+
+    def _refresh_visualization(self):
+        """Update overlay and treeview."""
+        if self.current_bw is None: return
+        
+        # 1. Update List
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+            
+        if self.show_auto_in_list.get():
+             for d in self.auto_defects:
+                 self.tree.insert("", "end", values=(d['id'], d['type'], d['area']), tags="auto")
+
+        for m in self.manual_labels:
+            self.tree.insert("", "end", values=(f"M{m['id']}", m['type'], m['area']), tags="manual")
+            
+        # 2. Update Image Overlay
+        vis_img = cv2.cvtColor(self.current_bw, cv2.COLOR_GRAY2RGB)
+        
+        if self.show_overlay.get():
+             for d in self.auto_defects:
+                 x, y, w, h = d['bbox']
+                 cv2.rectangle(vis_img, (x, y), (x+w, y+h), (0, 0, 255), 1)
+                 
+             for m in self.manual_labels:
+                 x, y, w, h = m['x'], m['y'], m['w'], m['h']
+                 cv2.rectangle(vis_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                 cv2.putText(vis_img, m['type'], (x, y-2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                 
+        self._display_on_canvas(vis_img, self.bw_canvas)
+
+    def _remove_selected_label(self):
+        """Remove the selected label from the list."""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("Select Label", "Please select a label to remove.")
+            return
+
+        item = self.tree.item(selected[0])
+        tags = item.get("tags")
+        values = item.get("values")
+        
+        # Only allow deleting manual labels
+        if "manual" in tags:
+            label_id = str(values[0]) # e.g. "M1"
+            
+            # Find in manual_labels list
+            # The ID in tree is "M{id}", so we strip "M"
+            try:
+                raw_id = int(label_id.replace("M", ""))
+                
+                # Filter out the one to delete
+                old_len = len(self.manual_labels)
+                self.manual_labels = [m for m in self.manual_labels if m['id'] != raw_id]
+                
+                if len(self.manual_labels) < old_len:
+                    self._refresh_visualization()
+                    self._save_labels_json()
+                    # Keep removed logic consistent with Undo/Clear
+            except ValueError:
+                 pass
+        else:
+            messagebox.showinfo("Cannot Delete", "Only manual labels can be removed here.\nAuto defects are generated by processing settings.")
+
+    def _open_labeler(self):
+        if self.current_image is None: return
+        DefectLabelerWindow(self, self.current_image.copy(), self.manual_labels, self._update_labels)
+        
+    def _update_labels(self, new_labels):
+        self.manual_labels = new_labels
+        self._refresh_visualization()
+        self._save_labels_json()
+        
+    def _save_labels_json(self):
+        if not self.files: return
+        try:
+            folder = os.path.dirname(self.files[self.idx])
+            base = os.path.splitext(os.path.basename(self.files[self.idx]))[0]
+            path = os.path.join(folder, f"{base}_labels.json")
+            with open(path, 'w') as f:
+                json.dump(self.manual_labels, f, indent=2)
+        except: pass
+        
+
     
     def _prev_image(self):
         """Navigate to previous image."""
@@ -3553,7 +3906,8 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
                 rgb, alpha = self._read_image_with_alpha(path)
                 result = self._make_binary(rgb, alpha, sigma=sigma, thresh=thresh, 
                                           use_otsu=use_otsu, use_adaptive=use_adaptive,
-                                          block_size=block_size, c_value=c_value)
+                                          block_size=block_size, c_value=c_value,
+                                          use_hsv=self.use_hsv.get())
                 _, _, bw, mask_bool, _ = result
                 
                 white_px, black_px, area_px, white_pct, black_pct = self._compute_stats(bw, mask_bool)
@@ -3620,7 +3974,8 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
                 rgb, alpha = self._read_image_with_alpha(path)
                 result = self._make_binary(rgb, alpha, sigma=sigma, thresh=thresh, 
                                           use_otsu=use_otsu, use_adaptive=use_adaptive,
-                                          block_size=block_size, c_value=c_value)
+                                          block_size=block_size, c_value=c_value,
+                                          use_hsv=self.use_hsv.get())
                 _, _, bw, mask_bool, _ = result
                 _, _, _, white_pct, black_pct = self._compute_stats(bw, mask_bool)
                 status = "DEFECT" if black_pct > black_th else "OK"
@@ -3631,18 +3986,26 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
             except Exception as e:
                 self.results.append({"path": path, "error": str(e), "status": "ERROR"})
     
-    def _display_image(self, img, label, size=(450, 400), is_gray=False, is_rgb=False):
-        """Display image in label."""
+    def _display_on_canvas(self, img, canvas, size=(450, 400), is_gray=False, is_rgb=False):
+        """Display image on canvas with centering and metadata."""
         if img is None or img.size == 0:
             return
         
         h, w = img.shape[:2]
+        if h == 0 or w == 0: return
+        
+        # Get canvas dimensions
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        if cw > 10 and ch > 10:
+            size = (cw, ch)
+            
         ratio = min(size[0]/w, size[1]/h)
         new_w, new_h = int(w * ratio), int(h * ratio)
         
-        if new_w == 0 or new_h == 0:
+        if new_w <= 0 or new_h <= 0:
             return
-        
+            
         img_resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
         
         if is_gray or len(img_resized.shape) == 2:
@@ -3651,8 +4014,69 @@ class SimpleDefectDetectionWindow(tk.Toplevel):
             img_resized = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
         
         photo = ImageTk.PhotoImage(image=Image.fromarray(img_resized))
-        label.config(image=photo)
-        label.image = photo
+        
+        # Center in canvas
+        off_x = (size[0] - new_w) // 2
+        off_y = (size[1] - new_h) // 2
+        
+        canvas.delete("all")
+        canvas.create_image(off_x, off_y, anchor=tk.NW, image=photo)
+        canvas.image = photo # Keep reference
+        
+        # Store metadata for coordinates
+        self.canvas_meta[canvas] = (ratio, off_x, off_y, w, h)
+
+    def _on_mouse_move(self, event):
+        """Track mouse coordinates."""
+        canvas = event.widget
+        if canvas not in self.canvas_meta:
+            return
+            
+        ratio, off_x, off_y, orig_w, orig_h = self.canvas_meta[canvas]
+        
+        # Canvas coords
+        cx, cy = event.x, event.y
+        
+        # Image coords
+        if ratio > 0:
+            ix = int((cx - off_x) / ratio)
+            iy = int((cy - off_y) / ratio)
+        else:
+            ix, iy = 0, 0
+            
+        # Check bounds
+        if 0 <= ix < orig_w and 0 <= iy < orig_h:
+            self.lbl_coords.config(text=f"XY: {ix}, {iy}")
+            self._draw_crosshair(self.orig_canvas, ix, iy)
+            self._draw_crosshair(self.bw_canvas, ix, iy)
+        else:
+            self.lbl_coords.config(text="XY: -")
+            self.orig_canvas.delete("crosshair")
+            self.bw_canvas.delete("crosshair")
+
+    def _on_mouse_leave(self, event):
+        """Clear coordinates on leave."""
+        self.lbl_coords.config(text="XY: -")
+        self.orig_canvas.delete("crosshair")
+        self.bw_canvas.delete("crosshair")
+
+    def _draw_crosshair(self, canvas, img_x, img_y):
+        """Draw crosshair on target canvas."""
+        canvas.delete("crosshair")
+        if canvas not in self.canvas_meta:
+            return
+            
+        ratio, off_x, off_y, w, h = self.canvas_meta[canvas]
+        
+        # Target canvas coords
+        tx = int(img_x * ratio + off_x)
+        ty = int(img_y * ratio + off_y)
+        
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        
+        canvas.create_line(0, ty, cw, ty, fill="cyan", tags="crosshair", dash=(4, 4))
+        canvas.create_line(tx, 0, tx, ch, fill="cyan", tags="crosshair", dash=(4, 4))
 
 
 class OverviewWindow(tk.Toplevel):
@@ -4314,338 +4738,314 @@ class RedPadExtractorTab(tk.Frame):
         self.image_label.image = photo
 
 
-class SimpleDefectDetectionTab(tk.Frame):
-    """Simple Defect Detection Tab (for notebook embedding) - Full featured version."""
+
+# ==============================================================================
+# HELPER FUNCTIONS FOR DEFECT DETECTION
+# ==============================================================================
+
+def masked_gaussian_smooth(gray01, mask01, sigma):
+    """Normalized masked Gaussian (avoid boundary bleeding)."""
+    if sigma <= 0:
+        out = gray01.copy()
+        out[mask01 <= 0] = 0.0
+        return out
+
+    k = int(6 * sigma + 1)
+    if k % 2 == 0:
+        k += 1
+    k = max(k, 3)
+
+    num = cv2.GaussianBlur(gray01 * mask01, (k, k), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REFLECT)
+    den = cv2.GaussianBlur(mask01, (k, k), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REFLECT)
+    out = num / (den + 1e-8)
+    out[mask01 <= 0] = 0.0
+    return out
+
+def masked_median_smooth(gray01, mask01, kernel_size=3):
+    """Normalized masked median (avoid boundary bleeding)."""
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    kernel_size = max(kernel_size, 3)
     
-    BG_COLOR = "#000000"
-    FG_COLOR = "#00FFFF"
-    ACCENT_COLOR = "#00FFFF"
-    FONT_FACE = "Consolas"
+    src = (gray01 * 255.0).astype(np.uint8)
+    out = cv2.medianBlur(src, kernel_size)
+    out_f = out.astype(np.float32) / 255.0
+    out_f[mask01 <= 0] = 0.0
+    return out_f
+
+def masked_bilateral_smooth(gray01, mask01, sigma):
+    """
+    Bilateral filter: smooths flat areas (texture) but keeps edges.
+    """
+    d = 9
+    # sigmaColor: 75 is standard. sigmaSpace: controlled by slider via 'sigma' param
+    s_space = max(sigma, 0.1)
+    s_color = 75.0
     
-    SUPPORTED_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+    src = (gray01 * 255.0).astype(np.uint8)
+    out = cv2.bilateralFilter(src, d, s_color, s_space)
+    out_f = out.astype(np.float32) / 255.0
+    out_f[mask01 <= 0] = 0.0
+    return out_f
+
+def analyze_defects(bw_u8, mask_bool, min_area=5):
+    """
+    Find connected components of 'defects' (black pixels inside mask).
+    Returns list of dicts: {id, type, x, y, area, circularity, bbox}
+    """
+    if mask_bool is None:
+        return [], None
+
+    defect_map = np.zeros_like(bw_u8)
+    defect_indices = (mask_bool) & (bw_u8 == 0)
+    defect_map[defect_indices] = 255
     
-    def __init__(self, parent, app):
-        super().__init__(parent, bg=self.BG_COLOR)
-        self.app = app
+    num, labels, stats, centroids = cv2.connectedComponentsWithStats(defect_map, connectivity=8)
+    
+    defects = []
+    # label 0 is background (non-defect), start from 1
+    for i in range(1, num):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area < min_area:
+            continue
+            
+        x = stats[i, cv2.CC_STAT_LEFT]
+        y = stats[i, cv2.CC_STAT_TOP]
+        w = stats[i, cv2.CC_STAT_WIDTH]
+        h = stats[i, cv2.CC_STAT_HEIGHT]
+        cx, cy = centroids[i]
         
-        # Settings variables
-        self.input_folder = tk.StringVar(value="")
-        self.output_folder = tk.StringVar(value="")
-        self.sigma = tk.DoubleVar(value=1.2)
-        self.thresh = tk.DoubleVar(value=0.65)
-        self.use_otsu = tk.BooleanVar(value=True)
-        self.use_adaptive = tk.BooleanVar(value=False)
-        self.adaptive_block_size = tk.IntVar(value=11)
-        self.adaptive_c = tk.IntVar(value=2)
-        self.black_defect_pct = tk.DoubleVar(value=10.0)
+        # Simple Classification
+        aspect = float(w) / h if h > 0 else 0
+        if aspect < 1.0 and aspect > 0:
+            aspect = 1.0 / aspect
+            
+        if area < 20: 
+            dtype = "Pinhole"
+        elif aspect > 3.0:
+            dtype = "Scratch"
+        else:
+            dtype = "Stain"
+            
+        defects.append({
+            "id": i,
+            "type": dtype,
+            "x": int(cx),
+            "y": int(cy),
+            "area": area,
+            "bbox": (x, y, w, h)
+        })
         
-        # Image state
-        self.files = []
-        self.idx = 0
-        self.current_image = None
-        self.current_alpha = None
-        self.current_bw = None
-        self.results = []  # For overview
+    return defects, defect_map
+
+
+class DefectLabelerWindow(tk.Toplevel):
+    def __init__(self, parent, rgb_image, current_labels, on_save_callback):
+        super().__init__(parent)
+        self.title("Labeling Window - Fit to Screen")
+        self.state("zoomed") # Maximize
+        self.geometry("1400x900")
         
+        self.rgb_image = rgb_image
+        self.on_save_callback = on_save_callback
+        
+        # Deep copy labels so we don't mutate original until save
+        self.labels = [dict(l) for l in current_labels] 
+        self.edited = False
+        
+        self.orig_h, self.orig_w = rgb_image.shape[:2]
+        
+        # UI
         self._build_ui()
-    
+        
+        # Bind resize to refit image
+        self.canvas.bind("<Configure>", self._on_resize)
+        
+        # Mouse
+        self.canvas.bind("<ButtonPress-1>", self.on_mouse_down)
+        self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
+        self.canvas.bind("<Button-3>", self.on_right_click) # Right click delete
+
+        self.current_rect = None
+        self.start_x = 0
+        self.start_y = 0
+        
+        self.scale = 1.0
+        self.off_x = 0
+        self.off_y = 0
+        
     def _build_ui(self):
-        """Build the Simple Defect Detection UI."""
-        main_frame = tk.Frame(self, bg=self.BG_COLOR)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # Toolbar
+        toolbar = ttk.Frame(self, padding=5)
+        toolbar.pack(side="bottom", fill="x")
         
-        # Cyan title bar
-        title_bar = tk.Frame(main_frame, bg="#003333")
-        title_bar.pack(fill=tk.X)
-        tk.Label(title_bar, text="🔍 SIMPLE DEFECT DETECTION", 
-                font=(self.FONT_FACE, 12, 'bold'),
-                bg="#003333", fg=self.ACCENT_COLOR).pack(side=tk.LEFT, padx=10, pady=5)
+        ttk.Button(toolbar, text="Save & Close", command=self._save_and_close).pack(side="right", padx=10)
+        ttk.Button(toolbar, text="Cancel", command=self.destroy).pack(side="right", padx=10)
         
-        # Controls row with cyan styling
-        controls_frame = tk.Frame(main_frame, bg=self.BG_COLOR,
-                                 highlightbackground=self.FG_COLOR, highlightthickness=1)
-        controls_frame.pack(fill=tk.X, padx=5, pady=5)
+        # Edit Buttons
+        ttk.Button(toolbar, text="Undo Last", command=self._undo_last).pack(side="left", padx=5)
+        ttk.Button(toolbar, text="Clear All", command=self._clear_all).pack(side="left", padx=5)
         
-        tk.Button(controls_frame, text="📁 Input Folder",
-                 font=(self.FONT_FACE, 10, 'bold'),
-                 bg="#004444", fg=self.FG_COLOR,
-                 command=self._select_input).pack(side=tk.LEFT, padx=2, pady=5)
-        tk.Button(controls_frame, text="▶ Process",
-                 font=(self.FONT_FACE, 10, 'bold'),
-                 bg="#004444", fg=self.FG_COLOR,
-                 command=self._process_current).pack(side=tk.LEFT, padx=2, pady=5)
-        tk.Button(controls_frame, text="⏩ Process All",
-                 font=(self.FONT_FACE, 10, 'bold'),
-                 bg="#004444", fg=self.FG_COLOR,
-                 command=self._process_all).pack(side=tk.LEFT, padx=2, pady=5)
+        ttk.Label(toolbar, text="| Left Drag: New Label | Right Click: Delete Label").pack(side="left", padx=10)
         
-        # Navigation
-        tk.Button(controls_frame, text="◀ Prev",
-                 font=(self.FONT_FACE, 10, 'bold'),
-                 bg="#003333", fg=self.FG_COLOR,
-                 command=self._prev_image).pack(side=tk.LEFT, padx=2, pady=5)
-        tk.Button(controls_frame, text="Next ▶",
-                 font=(self.FONT_FACE, 10, 'bold'),
-                 bg="#003333", fg=self.FG_COLOR,
-                 command=self._next_image).pack(side=tk.LEFT, padx=2, pady=5)
+        # Canvas
+        self.canvas = tk.Canvas(self, bg="#333", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
         
-        self.file_label = tk.Label(controls_frame, text="No folder selected",
-                                  font=(self.FONT_FACE, 9),
-                                  bg=self.BG_COLOR, fg="#888888")
-        self.file_label.pack(side=tk.LEFT, padx=10)
+    def _on_resize(self, event):
+        self._refresh_image()
         
-        # Overview button on the right
-        tk.Button(controls_frame, text="📊 Overview",
-                 font=(self.FONT_FACE, 10, 'bold'),
-                 bg="#440044", fg="#FF88FF",
-                 command=self._open_overview).pack(side=tk.RIGHT, padx=2, pady=5)
+    def _refresh_image(self):
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw < 50 or ch < 50: return
         
-        # Settings row 1 - Thresholding mode
-        settings_frame1 = tk.Frame(main_frame, bg=self.BG_COLOR)
-        settings_frame1.pack(fill=tk.X, pady=2, padx=5)
+        # Calculate scale to FIT
+        scale_w = cw / self.orig_w
+        scale_h = ch / self.orig_h
+        self.scale = min(scale_w, scale_h) * 0.95 # 95% to have some margin
         
-        tk.Label(settings_frame1, text="Mode:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
-        ttk.Checkbutton(settings_frame1, text="Otsu (Auto)", 
-                       variable=self.use_otsu).pack(side=tk.LEFT, padx=3)
-        ttk.Checkbutton(settings_frame1, text="Adaptive", 
-                       variable=self.use_adaptive).pack(side=tk.LEFT, padx=3)
+        new_w = int(self.orig_w * self.scale)
+        new_h = int(self.orig_h * self.scale)
         
-        tk.Label(settings_frame1, text="│ Sigma:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(10, 0))
-        ttk.Scale(settings_frame1, from_=0.0, to=5.0, variable=self.sigma, 
-                 orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        # Resize
+        pil = Image.fromarray(self.rgb_image)
+        pil = pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        self.tk_img = ImageTk.PhotoImage(pil)
         
-        tk.Label(settings_frame1, text="│ Thresh:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(10, 0))
-        ttk.Scale(settings_frame1, from_=0.1, to=1.0, variable=self.thresh, 
-                 orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        # Center
+        self.off_x = (cw - new_w) // 2
+        self.off_y = (ch - new_h) // 2
         
-        # Settings row 2 - Adaptive params and defect threshold
-        settings_frame2 = tk.Frame(main_frame, bg=self.BG_COLOR)
-        settings_frame2.pack(fill=tk.X, pady=2, padx=5)
+        self.canvas.delete("all")
+        self.canvas.create_image(self.off_x, self.off_y, image=self.tk_img, anchor="nw")
         
-        tk.Label(settings_frame2, text="Block:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
-        ttk.Scale(settings_frame2, from_=3, to=51, variable=self.adaptive_block_size, 
-                 orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        # Redraw labels
+        for l in self.labels:
+            self._draw_label_rect(l)
+            
+    def _draw_label_rect(self, l):
+        # l has x, y, w, h in ORIGINAL coords
+        # Convert to CANVAS coords
+        x1 = l["x"] * self.scale + self.off_x
+        y1 = l["y"] * self.scale + self.off_y
+        x2 = (l["x"] + l["w"]) * self.scale + self.off_x
+        y2 = (l["y"] + l["h"]) * self.scale + self.off_y
         
-        tk.Label(settings_frame2, text="C:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(10, 0))
-        ttk.Scale(settings_frame2, from_=-10, to=20, variable=self.adaptive_c, 
-                 orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        tag = f"label_{l['id']}"
+        self.canvas.create_rectangle(x1, y1, x2, y2, outline="#00FF00", width=2, tags=tag)
+        self.canvas.create_text(x1, y1-10, text=l["type"], fill="#00FF00", anchor="sw", tags=tag)
         
-        tk.Label(settings_frame2, text="│ DEFECT if black% >", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(10, 0))
-        ttk.Entry(settings_frame2, textvariable=self.black_defect_pct, width=5).pack(side=tk.LEFT)
-        tk.Label(settings_frame2, text="%", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+    def _to_orig_coords(self, cx, cy):
+        ox = (cx - self.off_x) / self.scale
+        oy = (cy - self.off_y) / self.scale
+        return int(ox), int(oy)
         
-        # Image displays
-        display_frame = tk.Frame(main_frame, bg=self.BG_COLOR)
-        display_frame.pack(fill=tk.BOTH, expand=True)
+    def on_mouse_down(self, event):
+        self.start_x = event.x
+        self.start_y = event.y
+        self.current_rect = self.canvas.create_rectangle(
+            self.start_x, self.start_y, self.start_x, self.start_y,
+            outline="yellow", width=2, dash=(4,4)
+        )
+
+    def on_mouse_drag(self, event):
+        if self.current_rect:
+            self.canvas.coords(self.current_rect, self.start_x, self.start_y, event.x, event.y)
+            
+    def on_mouse_up(self, event):
+        if not self.current_rect: return
+        self.canvas.delete(self.current_rect)
+        self.current_rect = None
         
-        # Original
-        orig_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
-        orig_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
-        tk.Label(orig_frame, text="Original", bg=self.BG_COLOR, fg=self.FG_COLOR).pack()
-        self.orig_label = tk.Label(orig_frame, bg="#111111")
-        self.orig_label.pack(fill=tk.BOTH, expand=True)
+        x1, y1 = self.start_x, self.start_y
+        x2, y2 = event.x, event.y
         
-        # Binary
-        bw_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
-        bw_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
-        tk.Label(bw_frame, text="Binary", bg=self.BG_COLOR, fg=self.FG_COLOR).pack()
-        self.bw_label = tk.Label(bw_frame, bg="#111111")
-        self.bw_label.pack(fill=tk.BOTH, expand=True)
+        if abs(x2-x1) < 5 or abs(y2-y1) < 5: return
         
-        # Result label
-        self.result_label = tk.Label(main_frame, text="Result: --", 
-                                    font=(self.FONT_FACE, 14, 'bold'),
-                                    bg=self.BG_COLOR, fg=self.FG_COLOR)
-        self.result_label.pack(pady=5)
-    
-    def _select_input(self):
-        """Select input folder."""
-        folder = filedialog.askdirectory(title="Select Input Folder")
-        if folder:
-            self.input_folder.set(folder)
-            self.files = self._list_images(folder)
-            self.idx = 0
-            if self.files:
-                self._load_current()
-            self.file_label.config(text=f"{len(self.files)} images found")
-    
-    def _list_images(self, folder):
-        """List all supported image files in folder."""
-        files = []
-        for f in sorted(os.listdir(folder)):
-            if f.lower().endswith(self.SUPPORTED_EXTS):
-                files.append(os.path.join(folder, f))
-        return files
-    
-    def _load_current(self):
-        """Load current image."""
-        if not self.files or self.idx >= len(self.files):
-            return
+        # Normalize
+        if x1 > x2: x1, x2 = x2, x1
+        if y1 > y2: y1, y2 = y2, y1
         
-        path = self.files[self.idx]
-        try:
-            from .io import read_image
-            self.current_image = read_image(path)
-            self.current_alpha = None
-            self._display_image(self.current_image, self.orig_label)
-            self.file_label.config(text=f"{self.idx+1}/{len(self.files)}: {os.path.basename(path)}")
-        except Exception as e:
-            self.file_label.config(text=f"Error: {e}")
-    
-    def _prev_image(self):
-        """Go to previous image."""
-        if self.idx > 0:
-            self.idx -= 1
-            self._load_current()
-    
-    def _next_image(self):
-        """Go to next image."""
-        if self.idx < len(self.files) - 1:
-            self.idx += 1
-            self._load_current()
-    
-    def _make_binary(self, rgb, alpha=None):
-        """Convert to binary using threshold, Otsu, or adaptive."""
-        if len(rgb.shape) == 3:
-            gray = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = rgb
+        ox1, oy1 = self._to_orig_coords(x1, y1)
+        ox2, oy2 = self._to_orig_coords(x2, y2)
         
-        # Apply Gaussian blur if sigma > 0
-        sigma = self.sigma.get()
-        if sigma > 0:
-            k = int(6 * sigma + 1)
-            if k % 2 == 0:
-                k += 1
-            k = max(k, 3)
-            gray = cv2.GaussianBlur(gray, (k, k), sigma)
+        # Check bounds
+        ox1 = max(0, ox1); oy1 = max(0, oy1)
+        ox2 = min(self.orig_w, ox2); oy2 = min(self.orig_h, oy2)
         
-        if self.use_adaptive.get():
-            # Adaptive thresholding
-            block = int(self.adaptive_block_size.get())
-            if block % 2 == 0:
-                block += 1
-            block = max(3, block)
-            c = int(self.adaptive_c.get())
-            bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                       cv2.THRESH_BINARY, block, c)
-        elif self.use_otsu.get():
-            # Otsu thresholding
-            _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        else:
-            # Manual threshold
-            thresh_val = int(self.thresh.get() * 255)
-            _, bw = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY)
+        w = ox2 - ox1
+        h = oy2 - oy1
         
-        return bw
-    
-    def _process_current(self):
-        """Process current image."""
-        if self.current_image is None:
-            messagebox.showwarning("No Image", "Please load an image first.")
-            return
+        if w < 5 or h < 5: return
         
-        bw = self._make_binary(self.current_image, self.current_alpha)
-        self.current_bw = bw
-        self._display_image(cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR), self.bw_label)
+        # Simple askstring for now (importing simpledialog if needed, or using custom)
+        # Using tkinter.simpledialog
+        import tkinter.simpledialog as sd
+        cls = sd.askstring("Class", "Defect Type (Scratch, Stain, Pinhole):", parent=self, initialvalue="Stain")
+        if not cls: return
         
-        # Compute stats
-        total = bw.size
-        white = np.count_nonzero(bw)
-        black = total - white
-        white_pct = white / total * 100
-        black_pct = black / total * 100
-        
-        thresh = self.black_defect_pct.get()
-        if black_pct > thresh:
-            self.result_label.config(text=f"DEFECT: {black_pct:.1f}% black", foreground="#FF4444")
-        else:
-            self.result_label.config(text=f"OK: {black_pct:.1f}% black", foreground="#00FF00")
-    
-    def _process_all(self):
-        """Process all images in folder."""
-        if not self.files:
-            messagebox.showwarning("No Images", "Please select an input folder first.")
-            return
-        
-        results = {"ok": 0, "defect": 0}
-        
-        for i, path in enumerate(self.files):
+        # Add label
+        new_id = 1
+        if self.labels:
             try:
-                from .io import read_image
-                img = read_image(path)
-                bw = self._make_binary(img)
-                
-                total = bw.size
-                black = total - np.count_nonzero(bw)
-                black_pct = black / total * 100
-                
-                if black_pct > self.black_defect_pct.get():
-                    results["defect"] += 1
-                else:
-                    results["ok"] += 1
+                # Ensure existing IDs are ints
+                ids = [int(l["id"]) for l in self.labels if str(l["id"]).isdigit()]
+                if ids:
+                    new_id = max(ids) + 1
+                else: 
+                     new_id = len(self.labels) + 1
             except:
-                pass
+                new_id = len(self.labels) + 1
+                 
+        lbl = {
+            "id": new_id,
+            "type": cls,
+            "x": ox1, "y": oy1, "w": w, "h": h, "area": w*h
+        }
+        self.labels.append(lbl)
+        self.edited = True
+        self._refresh_image() # Redraw all
         
-        messagebox.showinfo("Batch Complete", 
-            f"Processed {len(self.files)} images:\n\n"
-            f"OK: {results['ok']}\n"
-            f"DEFECT: {results['defect']}")
-    
-    def _display_image(self, cv2_image, label, size=(350, 300)):
-        """Display image in the label."""
-        if cv2_image is None:
-            return
-        h, w = cv2_image.shape[:2]
-        ratio = min(size[0]/w, size[1]/h)
-        new_w, new_h = int(w * ratio), int(h * ratio)
-        if new_w == 0 or new_h == 0:
-            return
-        img_resized = cv2.resize(cv2_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        if len(img_resized.shape) == 2:
-            img_resized = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2BGR)
-        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-        photo = ImageTk.PhotoImage(image=Image.fromarray(img_rgb))
-        label.config(image=photo)
-        label.image = photo
-    
-    def _open_overview(self):
-        """Open overview window showing all processed results."""
-        if not self.files:
-            messagebox.showwarning("No Images", "Please select an input folder first.")
-            return
+    def on_right_click(self, event):
+        ox, oy = self._to_orig_coords(event.x, event.y)
+        # Find label
+        to_del = None
+        for l in self.labels:
+            if l["x"] <= ox <= l["x"]+l["w"] and l["y"] <= oy <= l["y"]+l["h"]:
+                to_del = l
+                break
         
-        # Quick process all images for overview
-        self.results = []
-        for path in self.files:
-            try:
-                from .io import read_image
-                img = read_image(path)
-                bw = self._make_binary(img)
-                
-                total = bw.size
-                white = np.count_nonzero(bw)
-                black = total - white
-                black_pct = black / total * 100
-                
-                status = "DEFECT" if black_pct > self.black_defect_pct.get() else "OK"
-                
-                # Convert to RGB for display
-                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                
-                self.results.append({
-                    "path": path,
-                    "rgb": rgb,
-                    "bw": bw,
-                    "white_pct": 100 - black_pct,
-                    "black_pct": black_pct,
-                    "status": status
-                })
-            except Exception as e:
-                self.results.append({"path": path, "error": str(e)})
-        
-        # Open overview window (using existing OverviewWindow class)
-        OverviewWindow(self, self.results, self.black_defect_pct.get())
+        if to_del:
+            if messagebox.askyesno("Delete", f"Delete {to_del['type']}?", parent=self):
+                self.labels.remove(to_del)
+                self.edited = True
+                self._refresh_image()
+
+    def _undo_last(self):
+        """Remove the last added label."""
+        if self.labels:
+            self.labels.pop()
+            self.edited = True
+            self._refresh_image()
+
+    def _clear_all(self):
+        """Remove all manual labels."""
+        if not self.labels: return
+        if messagebox.askyesno("Clear All", "Delete all manual labels?", parent=self):
+            self.labels.clear()
+            self.edited = True
+            self._refresh_image()
+
+    def _save_and_close(self):
+        if self.on_save_callback:
+            self.on_save_callback(self.labels)
+        self.destroy()
+
+
+
+
 
 
 # ==============================================================================
@@ -4670,5 +5070,3 @@ if __name__ == "__main__":
     print("Starting GUI anyway...")
     print("")
     main()
-
-
