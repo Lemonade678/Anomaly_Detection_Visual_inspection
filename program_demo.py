@@ -689,9 +689,113 @@ def run_gui():
     app.mainloop()
 
 
+# ==============================================================================
+# LAUNCHER WINDOW
+# ==============================================================================
+
+class LauncherWindow:
+    """Simple launcher window for choosing application mode."""
+    
+    def __init__(self):
+        import tkinter as tk
+        from tkinter import ttk
+        
+        self.root = tk.Tk()
+        self.root.title("PCB Inspection Launcher")
+        self.root.geometry("450x350")
+        self.root.configure(bg="#1a1a1a")
+        self.root.resizable(False, False)
+        
+        # Center on screen
+        self.root.update_idletasks()
+        x = (self.root.winfo_screenwidth() // 2) - 225
+        y = (self.root.winfo_screenheight() // 2) - 175
+        self.root.geometry(f"+{x}+{y}")
+        
+        # Title
+        title = tk.Label(self.root, text="PCB Inspection System", 
+                        font=("Consolas", 16, "bold"),
+                        bg="#1a1a1a", fg="#00FFFF")
+        title.pack(pady=(20, 5))
+        
+        subtitle = tk.Label(self.root, text="Select a mode to start", 
+                           font=("Consolas", 10),
+                           bg="#1a1a1a", fg="#888888")
+        subtitle.pack(pady=(0, 20))
+        
+        # Button style
+        btn_style = {"font": ("Consolas", 11, "bold"), "width": 35, "height": 2,
+                    "bg": "#333333", "fg": "#00FF41", "activebackground": "#444444",
+                    "activeforeground": "#00FF88", "cursor": "hand2", "relief": "flat"}
+        
+        # Main inspection button
+        main_btn = tk.Button(self.root, text="▶ Simple Defect Detection + Labeling", 
+                            command=self._launch_main, **btn_style)
+        main_btn.pack(pady=5)
+        
+        # Pixel inspection button
+        pixel_btn = tk.Button(self.root, text="📊 Pixel Inspection (Hiatus)", 
+                             command=self._launch_pixel_inspection, **btn_style)
+        pixel_btn.pack(pady=5)
+        
+        # Batch processing button
+        batch_btn = tk.Button(self.root, text="📁 Batch Processing (CLI)", 
+                             command=self._show_batch_help, **btn_style)
+        batch_btn.pack(pady=5)
+        
+        # Demo button
+        demo_btn = tk.Button(self.root, text="🔬 Run Demo", 
+                            command=self._run_demo, **btn_style)
+        demo_btn.pack(pady=5)
+        
+        # Footer
+        footer = tk.Label(self.root, text="v1.0 - Integrated PCB Inspection", 
+                         font=("Consolas", 8),
+                         bg="#1a1a1a", fg="#555555")
+        footer.pack(side=tk.BOTTOM, pady=10)
+        
+    def _launch_main(self):
+        self.root.destroy()
+        run_gui()
+    
+    def _launch_pixel_inspection(self):
+        self.root.destroy()
+        from modular_inspection_integrated.gui import InspectorApp, PixelInspectionWindow
+        import tkinter as tk
+        # Create a hidden main app, open pixel inspection as standalone
+        root = tk.Tk()
+        root.withdraw()  # Hide main window
+        pixel_win = PixelInspectionWindow(root)
+        pixel_win.protocol("WM_DELETE_WINDOW", lambda: (pixel_win.destroy(), root.destroy()))
+        root.mainloop()
+    
+    def _show_batch_help(self):
+        import tkinter.messagebox as messagebox
+        messagebox.showinfo("Batch Processing", 
+            "Run batch processing from command line:\\n\\n"
+            "python Program_Demo.py --batch -i <input_dir> -o <output_dir> [-g <golden_image>]\\n\\n"
+            "This will process all images in input_dir and save results to output_dir.")
+    
+    def _run_demo(self):
+        self.root.destroy()
+        run_inspection_demo()
+        run_grid_analysis_demo()
+        print("\\nDemo completed. Press Enter to exit...")
+        input()
+    
+    def run(self):
+        self.root.mainloop()
+
+
+def run_launcher():
+    """Launch the launcher window."""
+    launcher = LauncherWindow()
+    launcher.run()
+
+
 if __name__ == "__main__":
     # This is the MAIN entry point for the PCB Inspection application
-    # Run: python hybrid_integrated.py [options]
+    # Run: python Program_Demo.py [options]
     
     if len(sys.argv) > 1:
         arg = sys.argv[1].lower()
@@ -706,12 +810,7 @@ if __name__ == "__main__":
             parser.add_argument("-o", "--output", required=True, help="Output directory for results")
             parser.add_argument("-g", "--golden", help="Path to golden/reference image (optional, auto-detected if omitted)")
             
-            # remove --batch to parse the rest
-            # Actually easier to just parse normally if we are in this block
-            # But sys.argv might have triggered this block manually.
-            # Let's re-parse full args.
             args = parser.parse_args()
-            
             run_batch_inspection_cli(args.input, args.output, args.golden)
             
         elif arg == "--demo":
@@ -719,26 +818,35 @@ if __name__ == "__main__":
             run_grid_analysis_demo()
         elif arg == "--grid-demo":
             run_grid_analysis_demo()
+        elif arg == "--gui":
+            # Direct launch (skip launcher)
+            run_gui()
         elif arg == "--help" or arg == "-h":
             print("=" * 60)
-            print("INTEGRATED PCB INSPECTION - hybrid_integrated.py")
+            print("INTEGRATED PCB INSPECTION - Program_Demo.py")
             print("=" * 60)
             print("")
             print("Usage:")
-            print("  python hybrid_integrated.py              Launch GUI (default)")
-            print("  python hybrid_integrated.py --batch -i <in> -o <out> [-g <ref>]   Run batch inspection")
-            print("  python hybrid_integrated.py --demo       Run pipeline demo")
-            print("  python hybrid_integrated.py --grid-demo  Run grid analysis demo")
-            print("  python hybrid_integrated.py --help       Show this help message")
+            print("  python Program_Demo.py                   Launch Launcher (default)")
+            print("  python Program_Demo.py --gui             Launch Main GUI directly")
+            print("  python Program_Demo.py --batch -i <in> -o <out> [-g <ref>]   Run batch inspection")
+            print("  python Program_Demo.py --demo            Run pipeline demo")
+            print("  python Program_Demo.py --grid-demo       Run grid analysis demo")
+            print("  python Program_Demo.py --help            Show this help message")
             print("")
             print("For programmatic use:")
-            print("  from hybrid_integrated import run_inspection, run_inspection_with_config")
+            print("  from Program_Demo import run_inspection, run_inspection_with_config")
             print("  result = run_inspection(golden_image, test_image)")
             print("")
         else:
             print(f"Unknown option: {arg}")
             print("Use --help for usage information")
     else:
+        # Default: Launch launcher window
+        run_launcher()
+
+
         # Default: Launch GUI application
         run_gui()
+
 
