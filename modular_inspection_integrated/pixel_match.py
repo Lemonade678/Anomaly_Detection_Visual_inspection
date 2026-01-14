@@ -107,7 +107,7 @@ def run_pixel_matching(
         )
     else:
         thresh_val = int(pixel_thresh)
-        _, thresh = cv2.threshold(diff, thresh_val, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        _, thresh = cv2.threshold(diff, thresh_val, 255, cv2.THRESH_BINARY)
     
     # Morphological operations
     kernel = np.ones(kernel_size, np.uint8)
@@ -246,7 +246,7 @@ def run_pixel_matching_multiscale(
     for kernel_size in scales:
         kernel = np.ones(kernel_size, np.uint8)
         
-        _, thresh = cv2.threshold(diff, pixel_thresh, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        _, thresh = cv2.threshold(diff, pixel_thresh, 255, cv2.THRESH_BINARY)
         opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
         closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernel)
         
