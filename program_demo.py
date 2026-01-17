@@ -845,8 +845,3 @@ if __name__ == "__main__":
         # Default: Launch launcher window
         run_launcher()
 
-
-        # Default: Launch GUI application
-        run_gui()
-
-
