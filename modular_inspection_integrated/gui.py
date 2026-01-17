@@ -2779,6 +2779,8 @@ class InspectorApp(tk.Tk):
         tools_menu.add_command(label="🔶 Gold Pad Extractor", command=self._open_gold_pad_extractor)
         tools_menu.add_command(label="🔴 Red Pad Extractor", command=self._open_red_pad_extractor)
         tools_menu.add_separator()
+        tools_menu.add_command(label="🌀 Texture Analysis (FFT)", command=self._open_texture_analysis)
+        tools_menu.add_separator()
         tools_menu.add_command(label="📄 Open Log File", command=self._open_log_file)
         
         # Help menu
@@ -2821,6 +2823,9 @@ class InspectorApp(tk.Tk):
 
     def _open_red_pad_extractor(self):
         self._open_tool_window("Red Pad", RedPadExtractorWindow)
+    
+    def _open_texture_analysis(self):
+        self._open_tool_window("Texture Analysis", TextureAnalysisWindow)
         
     def _open_log_file(self):
         import subprocess
@@ -4791,7 +4796,13 @@ def masked_bilateral_smooth(gray01, mask01, sigma):
 def analyze_defects(bw_u8, mask_bool, min_area=5):
     """
     Find connected components of 'defects' (black pixels inside mask).
-    Returns list of dicts: {id, type, x, y, area, circularity, bbox}
+    Returns list of dicts: {id, type, x, y, area, circularity, solidity, bbox}
+    
+    Classification Criteria:
+    - Pinhole: Very small defects (area < 30 pixels)
+    - Scratch: Elongated defects (aspect > 3.0) OR low circularity (< 0.3)
+    - Stain: Round/blob-like defects (circularity > 0.5)
+    - Irregular: Everything else (jagged, non-round, non-elongated)
     """
     if mask_bool is None:
         return [], None
@@ -4800,39 +4811,60 @@ def analyze_defects(bw_u8, mask_bool, min_area=5):
     defect_indices = (mask_bool) & (bw_u8 == 0)
     defect_map[defect_indices] = 255
     
-    num, labels, stats, centroids = cv2.connectedComponentsWithStats(defect_map, connectivity=8)
+    # Find contours for more detailed analysis
+    contours, _ = cv2.findContours(defect_map, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     defects = []
-    # label 0 is background (non-defect), start from 1
-    for i in range(1, num):
-        area = stats[i, cv2.CC_STAT_AREA]
+    for i, contour in enumerate(contours):
+        area = cv2.contourArea(contour)
         if area < min_area:
             continue
-            
-        x = stats[i, cv2.CC_STAT_LEFT]
-        y = stats[i, cv2.CC_STAT_TOP]
-        w = stats[i, cv2.CC_STAT_WIDTH]
-        h = stats[i, cv2.CC_STAT_HEIGHT]
-        cx, cy = centroids[i]
         
-        # Simple Classification
-        aspect = float(w) / h if h > 0 else 0
-        if aspect < 1.0 and aspect > 0:
-            aspect = 1.0 / aspect
-            
-        if area < 20: 
-            dtype = "Pinhole"
-        elif aspect > 3.0:
-            dtype = "Scratch"
+        # Bounding box
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # Centroid
+        M = cv2.moments(contour)
+        if M["m00"] > 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
         else:
+            cx, cy = x + w // 2, y + h // 2
+        
+        # Aspect Ratio (normalized to always be >= 1)
+        aspect = float(w) / h if h > 0 else 1.0
+        if aspect < 1.0:
+            aspect = 1.0 / aspect
+        
+        # Circularity: 4π × Area / Perimeter² (1.0 = perfect circle)
+        perimeter = cv2.arcLength(contour, True)
+        circularity = (4 * np.pi * area) / (perimeter ** 2 + 1e-8)
+        circularity = min(circularity, 1.0)  # Cap at 1.0
+        
+        # Solidity: Area / Convex Hull Area (1.0 = solid, low = jagged/hollow)
+        hull = cv2.convexHull(contour)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / (hull_area + 1e-8)
+        
+        # Classification Logic
+        if area < 30:
+            dtype = "Pinhole"
+        elif aspect > 3.0 or circularity < 0.3:
+            dtype = "Scratch"
+        elif circularity > 0.5 and solidity > 0.8:
             dtype = "Stain"
-            
+        else:
+            dtype = "Irregular"
+        
         defects.append({
-            "id": i,
+            "id": i + 1,
             "type": dtype,
-            "x": int(cx),
-            "y": int(cy),
-            "area": area,
+            "x": cx,
+            "y": cy,
+            "area": int(area),
+            "circularity": round(circularity, 3),
+            "solidity": round(solidity, 3),
+            "aspect": round(aspect, 2),
             "bbox": (x, y, w, h)
         })
         
@@ -5046,6 +5078,245 @@ class DefectLabelerWindow(tk.Toplevel):
 
 
 
+
+
+# ==============================================================================
+# TEXTURE ANALYSIS (FFT) WINDOW
+# ==============================================================================
+
+class TextureAnalysisWindow(tk.Toplevel):
+    """FFT-based Texture Analysis Tool for filtering out periodic patterns."""
+    
+    BG_COLOR = "#0A0A1A"
+    FG_COLOR = "#00FFFF"
+    ACCENT_COLOR = "#FF00FF"
+    FONT_FACE = "Consolas"
+    
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        
+        self.title("Texture Analysis (FFT)")
+        self.geometry("1400x800")
+        self.configure(bg=self.BG_COLOR)
+        
+        # State
+        self.current_image = None
+        self.gray_image = None
+        self.fft_spectrum = None
+        self.fft_shifted = None
+        
+        self._build_ui()
+    
+    def _build_ui(self):
+        """Build the UI layout."""
+        # Title
+        title = tk.Label(self, text="[ TEXTURE ANALYSIS (FFT) ]",
+                        font=(self.FONT_FACE, 14, 'bold'),
+                        bg=self.BG_COLOR, fg=self.ACCENT_COLOR)
+        title.pack(pady=10)
+        
+        # Controls Frame
+        ctrl_frame = tk.Frame(self, bg=self.BG_COLOR)
+        ctrl_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        tk.Button(ctrl_frame, text="📁 Load Image", bg="#333", fg=self.FG_COLOR,
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 command=self._load_image).pack(side=tk.LEFT, padx=5)
+        
+        # Filter Type
+        tk.Label(ctrl_frame, text="Filter:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(20, 5))
+        self.filter_type = tk.StringVar(value="Low Pass")
+        ttk.Combobox(ctrl_frame, textvariable=self.filter_type,
+                    values=["Low Pass", "High Pass", "Band Pass"],
+                    state="readonly", width=12).pack(side=tk.LEFT, padx=5)
+        
+        # Radius Slider
+        tk.Label(ctrl_frame, text="Radius:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(20, 5))
+        self.radius = tk.IntVar(value=30)
+        self.radius_scale = ttk.Scale(ctrl_frame, from_=1, to=200, variable=self.radius,
+                                      orient=tk.HORIZONTAL, length=150,
+                                      command=self._on_radius_change)
+        self.radius_scale.pack(side=tk.LEFT, padx=5)
+        self.radius_label = tk.Label(ctrl_frame, text="30", bg=self.BG_COLOR, fg=self.FG_COLOR, width=4)
+        self.radius_label.pack(side=tk.LEFT)
+        
+        # Outer Radius (for Band Pass)
+        tk.Label(ctrl_frame, text="Outer:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(20, 5))
+        self.outer_radius = tk.IntVar(value=100)
+        self.outer_scale = ttk.Scale(ctrl_frame, from_=1, to=300, variable=self.outer_radius,
+                                     orient=tk.HORIZONTAL, length=100,
+                                     command=self._on_radius_change)
+        self.outer_scale.pack(side=tk.LEFT, padx=5)
+        self.outer_label = tk.Label(ctrl_frame, text="100", bg=self.BG_COLOR, fg=self.FG_COLOR, width=4)
+        self.outer_label.pack(side=tk.LEFT)
+        
+        # Apply Button
+        tk.Button(ctrl_frame, text="▶ Apply Filter", bg="#004400", fg="#00FF00",
+                 font=(self.FONT_FACE, 10, 'bold'),
+                 command=self._apply_filter).pack(side=tk.LEFT, padx=20)
+        
+        # Display Frame (3 panels)
+        display_frame = tk.Frame(self, bg=self.BG_COLOR)
+        display_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Original Image
+        orig_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
+        orig_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+        tk.Label(orig_frame, text="ORIGINAL", bg=self.BG_COLOR, fg=self.FG_COLOR).pack()
+        self.orig_canvas = tk.Canvas(orig_frame, bg="#111", highlightthickness=0)
+        self.orig_canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # FFT Spectrum
+        fft_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
+        fft_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+        tk.Label(fft_frame, text="FREQUENCY SPECTRUM", bg=self.BG_COLOR, fg=self.ACCENT_COLOR).pack()
+        self.fft_canvas = tk.Canvas(fft_frame, bg="#111", highlightthickness=0)
+        self.fft_canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # Filtered Result
+        result_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
+        result_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+        tk.Label(result_frame, text="FILTERED RESULT", bg=self.BG_COLOR, fg="#00FF00").pack()
+        self.result_canvas = tk.Canvas(result_frame, bg="#111", highlightthickness=0)
+        self.result_canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # Status
+        self.status_var = tk.StringVar(value="Load an image to begin")
+        tk.Label(self, textvariable=self.status_var, bg="#222", fg=self.FG_COLOR,
+                font=(self.FONT_FACE, 9)).pack(fill=tk.X, side=tk.BOTTOM)
+    
+    def _load_image(self):
+        """Load an image file."""
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Select Image",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff")]
+        )
+        if path:
+            try:
+                from .io import read_image
+                self.current_image = read_image(path)
+                
+                # Convert to grayscale for FFT
+                if len(self.current_image.shape) == 3:
+                    self.gray_image = cv2.cvtColor(self.current_image, cv2.COLOR_BGR2GRAY)
+                else:
+                    self.gray_image = self.current_image.copy()
+                
+                self._display_on_canvas(self.current_image, self.orig_canvas)
+                self._compute_fft()
+                self.status_var.set(f"Loaded: {os.path.basename(path)} | Shape: {self.current_image.shape}")
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+    
+    def _compute_fft(self):
+        """Compute FFT and display spectrum."""
+        if self.gray_image is None:
+            return
+        
+        # FFT
+        f = np.fft.fft2(self.gray_image.astype(np.float32))
+        self.fft_shifted = np.fft.fftshift(f)
+        
+        # Magnitude spectrum (log scale for visualization)
+        magnitude = np.abs(self.fft_shifted)
+        magnitude = np.log1p(magnitude)  # log(1 + x) for better visualization
+        
+        # Normalize to 0-255
+        magnitude = (magnitude - magnitude.min()) / (magnitude.max() - magnitude.min() + 1e-8) * 255
+        self.fft_spectrum = magnitude.astype(np.uint8)
+        
+        # Display
+        spectrum_color = cv2.applyColorMap(self.fft_spectrum, cv2.COLORMAP_JET)
+        self._display_on_canvas(spectrum_color, self.fft_canvas)
+    
+    def _on_radius_change(self, val=None):
+        """Update radius label."""
+        self.radius_label.config(text=str(self.radius.get()))
+        self.outer_label.config(text=str(self.outer_radius.get()))
+    
+    def _apply_filter(self):
+        """Apply the selected frequency filter."""
+        if self.fft_shifted is None:
+            messagebox.showwarning("No Image", "Please load an image first.")
+            return
+        
+        h, w = self.gray_image.shape
+        cy, cx = h // 2, w // 2
+        
+        # Create mask
+        Y, X = np.ogrid[:h, :w]
+        dist = np.sqrt((X - cx)**2 + (Y - cy)**2)
+        
+        r = self.radius.get()
+        r_outer = self.outer_radius.get()
+        filter_type = self.filter_type.get()
+        
+        if filter_type == "Low Pass":
+            # Keep center (low frequencies), block outer (high frequencies)
+            mask = dist <= r
+        elif filter_type == "High Pass":
+            # Block center, keep outer
+            mask = dist >= r
+        elif filter_type == "Band Pass":
+            # Keep ring between r and r_outer
+            mask = (dist >= r) & (dist <= r_outer)
+        else:
+            mask = np.ones((h, w), dtype=bool)
+        
+        # Apply mask
+        filtered_fft = self.fft_shifted * mask
+        
+        # Inverse FFT
+        f_ishift = np.fft.ifftshift(filtered_fft)
+        img_back = np.fft.ifft2(f_ishift)
+        img_back = np.abs(img_back)
+        
+        # Normalize to 0-255
+        img_back = np.clip(img_back, 0, 255).astype(np.uint8)
+        
+        # Display result
+        self._display_on_canvas(img_back, self.result_canvas)
+        
+        # Also show filtered spectrum
+        filtered_magnitude = np.abs(filtered_fft)
+        filtered_magnitude = np.log1p(filtered_magnitude)
+        filtered_magnitude = (filtered_magnitude - filtered_magnitude.min()) / (filtered_magnitude.max() - filtered_magnitude.min() + 1e-8) * 255
+        spectrum_filtered = cv2.applyColorMap(filtered_magnitude.astype(np.uint8), cv2.COLORMAP_JET)
+        self._display_on_canvas(spectrum_filtered, self.fft_canvas)
+        
+        self.status_var.set(f"Applied {filter_type} filter with radius={r}")
+    
+    def _display_on_canvas(self, img, canvas):
+        """Display image on a canvas."""
+        if img is None:
+            return
+        
+        h, w = img.shape[:2]
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        
+        if cw < 10 or ch < 10:
+            cw, ch = 400, 400
+        
+        ratio = min(cw / w, ch / h)
+        new_w, new_h = int(w * ratio), int(h * ratio)
+        if new_w == 0 or new_h == 0:
+            return
+        
+        img_resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+        if len(img_resized.shape) == 2:
+            img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2RGB)
+        else:
+            img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        
+        photo = ImageTk.PhotoImage(image=Image.fromarray(img_rgb))
+        
+        canvas.delete("all")
+        canvas.create_image(cw // 2, ch // 2, image=photo, anchor=tk.CENTER)
+        canvas.image = photo  # Keep reference
 
 
 # ==============================================================================
