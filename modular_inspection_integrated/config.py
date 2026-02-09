@@ -28,10 +28,10 @@ class LightSensitivityMode(Enum):
     GOLD_PAD = "gold_pad"   # HSV filter for gold bonding pads
 
 
+
 class InspectionMode(Enum):
     """Inspection comparison method."""
     PIXEL_WISE = "pixel"      # Traditional pixel-by-pixel comparison
-    TEMPLATE_MATCH = "template"  # Template matching for camera position variance
 
 
 @dataclass
@@ -231,11 +231,18 @@ def get_inspection_params_from_substrate(substrate_config: dict) -> dict:
     }
 
 
+
+# Global Constants for quick access/scripting
+SSIM_PASS_THRESHOLD = 0.975
+PIXEL_DIFF_THRESHOLD = 40
+COUNT_THRESHOLD = 5000
+
 __all__ = [
     'AlignmentMethod', 'LightSensitivityMode', 'InspectionMode',
     'AlignmentConfig', 'LightSensitivityConfig', 'PixelMatchConfig',
     'IlluminationConfig', 'SSIMConfig', 'EdgeDetectionConfig',
     'GridAnalyzerConfig', 'InspectionConfig',
     'DEFAULT_CONFIG', 'get_default_config',
-    'load_substrate_config', 'get_inspection_params_from_substrate'
+    'load_substrate_config', 'get_inspection_params_from_substrate',
+    'SSIM_PASS_THRESHOLD', 'PIXEL_DIFF_THRESHOLD', 'COUNT_THRESHOLD'
 ]

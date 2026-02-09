@@ -1,14 +1,5 @@
-"""Integrated PCB Inspection GUI.
-
-NOTE: For the main entry point, use hybrid_integrated.py instead of this file.
-      Run: python hybrid_integrated.py
-
-Full-featured GUI combining:
-- V1 gui_1.py: Clean inspector interface
-- V2 gui_2.py + hybrid_2.py: Advanced controls (light sensitivity, alignment methods)
-
-This module provides the InspectorApp class for the GUI interface.
-It is imported and used by hybrid_integrated.py.
+"""
+Let focus on pad binary inspection
 """
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -18,9 +9,9 @@ import os
 import sys
 import time
 import csv
-import shutil
 import json
 from PIL import Image, ImageTk
+from inference_sdk import InferenceHTTPClient
 
 # Import from integrated package
 from .io import read_image
@@ -33,7 +24,7 @@ from .config import (
     LightSensitivityMode, LightSensitivityConfig,
     AlignmentConfig, get_default_config, InspectionMode
 )
-from .template_match import run_template_inspection, TemplateMatchConfig
+from .theme import DARK_THEME
 
 
 # ==============================================================================
@@ -98,1163 +89,6 @@ class ToolTip(object):
         if tw:
             tw.destroy()
 
-class AnomalyLocationMapper:
-    """Maps and reports anomaly locations with pixel coordinates."""
-    
-    def __init__(self):
-        self.anomaly_regions = []
-        self.centroids = []
-    
-    def analyze_mask(self, anomaly_mask: np.ndarray, min_area: int = 50) -> dict:
-        """Analyze anomaly mask to extract location information."""
-        self.anomaly_regions = []
-        self.centroids = []
-        
-        contours, _ = cv2.findContours(anomaly_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        h, w = anomaly_mask.shape
-        
-        for i, contour in enumerate(contours):
-            area = cv2.contourArea(contour)
-            if area < min_area:
-                continue
-            
-            x, y, bw, bh = cv2.boundingRect(contour)
-            
-            M = cv2.moments(contour)
-            if M["m00"] > 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-            else:
-                cx, cy = x + bw // 2, y + bh // 2
-            
-            sector_x = "Left" if cx < w/3 else ("Right" if cx > 2*w/3 else "Center")
-            sector_y = "Top" if cy < h/3 else ("Bottom" if cy > 2*h/3 else "Middle")
-            
-            region_info = {
-                'id': len(self.anomaly_regions) + 1,
-                'bbox': (x, y, bw, bh),
-                'centroid': (cx, cy),
-                'area_px': int(area),
-                'sector': f"{sector_y}-{sector_x}",
-                'relative_pos': (round(cx/w * 100, 1), round(cy/h * 100, 1))
-            }
-            
-            self.anomaly_regions.append(region_info)
-            self.centroids.append((cx, cy))
-        
-        return {
-            'regions': self.anomaly_regions,
-            'total_regions': len(self.anomaly_regions),
-            'total_anomalous_pixels': np.count_nonzero(anomaly_mask),
-            'image_size': (w, h)
-        }
-    
-    def create_annotated_image(self, base_image: np.ndarray) -> np.ndarray:
-        """Create an annotated image with anomaly locations."""
-        annotated = base_image.copy()
-        h, w = annotated.shape[:2]
-        
-        # Draw grid
-        grid_color = (40, 40, 40)
-        cv2.line(annotated, (w//3, 0), (w//3, h), grid_color, 1)
-        cv2.line(annotated, (2*w//3, 0), (2*w//3, h), grid_color, 1)
-        cv2.line(annotated, (0, h//3), (w, h//3), grid_color, 1)
-        cv2.line(annotated, (0, 2*h//3), (w, 2*h//3), grid_color, 1)
-        
-        for region in self.anomaly_regions:
-            x, y, bw, bh = region['bbox']
-            cx, cy = region['centroid']
-            region_id = region['id']
-            
-            cv2.rectangle(annotated, (x, y), (x+bw, y+bh), (0, 0, 255), 2)
-            cv2.circle(annotated, (cx, cy), 5, (0, 255, 255), -1)
-            
-            label = f"#{region_id}"
-            cv2.putText(annotated, label, (x + 2, y - 5), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        
-        return annotated
-    
-    def get_summary_text(self) -> str:
-        """Get formatted summary of anomaly locations."""
-        if not self.anomaly_regions:
-            return "No anomalies detected."
-        
-        lines = [f"Found {len(self.anomaly_regions)} anomaly region(s):"]
-        for region in self.anomaly_regions:
-            lines.append(f"  #{region['id']}: {region['sector']} @ {region['centroid']}")
-        return "\n".join(lines)
-
-
-# ==============================================================================
-# MAIN GUI APPLICATION
-# ==============================================================================
-
-class PixelInspectionWindow(tk.Toplevel):
-    """Integrated PCB Inspector GUI Application."""
-    
-    # Theme colors
-    BG_COLOR = "#000000"
-    FG_COLOR = "#00FF41"
-    ACCENT_COLOR = "#00FF41"
-    ERROR_COLOR = "#FF0000"
-    FONT_FACE = "Consolas"
-    
-    SSIM_PASS_THRESHOLD = 0.975
-    
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.parent = parent
-        
-        self.title("pixel_inspection_system(hiatus)")
-        self.geometry("1600x1000")
-        self.state('zoomed')  # Start maximized
-        self.configure(bg=self.BG_COLOR)
-        
-        # State variables
-        self.golden_image = None
-        self.test_image = None
-        self.aligned_image = None
-        self.ssim_score = 0.0
-        self._golden_loaded = False
-        self._test_loaded = False
-        
-        # Last inspection results (for saving)
-        self.last_result = None
-        self.last_heatmap = None
-        self.last_contour_map = None
-        self.last_ssim_heatmap = None
-        self.last_golden_path = None
-        self.last_test_path = None
-        
-        # Settings
-        self.selected_alignment_method = AlignmentMethod.AUTO
-        self.selected_light_mode = LightSensitivityMode.AUTO
-        self.selected_inspection_mode = InspectionMode.PIXEL_WISE  # New: inspection mode
-        self.selected_illum_method = "match_histogram"
-        self.gamma_value = 1.0
-        self.anomaly_mapper = AnomalyLocationMapper()
-        
-        # Canvas metadata for coordinate tracking: {canvas: (ratio, off_x, off_y, orig_w, orig_h)}
-        self.canvas_meta = {}
-        
-        # Template matching settings
-        self.template_grid_cols = 4
-        self.template_grid_rows = 4
-        self.template_search_margin = 50
-        
-        # Window management - track all open tool windows
-        self.tool_windows = {}  # {window_name: window_instance}
-        self.session_file = "inspector_session.json"
-        
-        # Log file
-        self.log_file = "inspection_log.csv"
-        self._init_log_file()
-        
-        # Build UI
-        self._setup_styles()
-        self._build_menu()
-        self._build_ui()
-        
-        # Handle close
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-        # self.after(500, self._load_session) # Removed
-
-    
-    def _on_close(self):
-        """Handle window closure."""
-        try:
-            self.display_canvas.unbind_all("<MouseWheel>")
-        except:
-            pass
-        self.destroy()
-    
-    def _go_back_to_main(self):
-        """Close this window and go back to main InspectorApp."""
-        try:
-            self.display_canvas.unbind_all("<MouseWheel>")
-        except:
-            pass
-        self.destroy()
-        # Main window is managed by InspectorApp, which should still be running
-    
-    def _init_log_file(self):
-        """Initialize log file with headers."""
-        if not os.path.exists(self.log_file):
-            with open(self.log_file, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(['Timestamp', 'Image', 'Verdict', 'AreaScore', 
-                               'AnomalyCount', 'PixelVerdict', 'SSIM', 'Time'])
-    
-    def _build_menu(self):
-        """Build menu bar with navigation and help."""
-        menubar = tk.Menu(self)
-        self.config(menu=menubar)
-        
-        # Navigate menu
-        nav_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Navigate", menu=nav_menu)
-        nav_menu.add_command(label="← Back to Main Window", command=self._go_back_to_main)
-        nav_menu.add_separator()
-        nav_menu.add_command(label="Close This Window", command=self._on_close)
-        
-        # Help menu
-        help_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Help", menu=help_menu)
-        help_menu.add_command(label="How to Use", command=self._show_help)
-        help_menu.add_command(label="About", command=self._show_about)
-    
-    def _show_help(self):
-        """Show help dialog."""
-        help_text = """Pixel Inspection System (Hiatus)
-
-This tool compares a Golden (reference) image with a Test image to detect anomalies.
-
-1. Load Golden Image: Select the reference/master image.
-2. Load Test Image: Select the image to inspect.
-3. Click 'Inspect' to run the analysis.
-4. Results show SSIM score, pixel differences, and anomaly locations.
-
-Settings:
-- Alignment: Choose method for aligning images (Auto, Phase, ORB, etc.)
-- Light Mode: Adjust for different lighting conditions.
-- Inspection Mode: Choose between Pixel-Wise or Template matching."""
-        messagebox.showinfo("Help - Pixel Inspection", help_text)
-    
-    def _show_about(self):
-        """Show about dialog."""
-        messagebox.showinfo("About", "Pixel Inspection System (Hiatus)\n\nAdvanced PCB inspection with SSIM and pixel matching.\n\nPart of Integrated PCB Inspector.")
-    
-    def _setup_styles(self):
-        """Configure ttk styles."""
-        style = ttk.Style()
-        style.theme_use('clam')
-        
-        style.configure("TLabel", background=self.BG_COLOR, foreground=self.FG_COLOR,
-                       font=(self.FONT_FACE, 10))
-        style.configure("TButton", background="#333333", foreground=self.FG_COLOR,
-                       font=(self.FONT_FACE, 10, 'bold'))
-        style.configure("TFrame", background=self.BG_COLOR)
-        style.configure("TCheckbutton", background=self.BG_COLOR, foreground=self.FG_COLOR)
-    
-    def _build_ui(self):
-        """Build the main UI layout."""
-        # Main container with controls on left
-        outer_frame = ttk.Frame(self)
-        outer_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Left panel - Controls (fixed, not scrollable)
-        controls_frame = tk.Frame(outer_frame, bg=self.BG_COLOR, width=320)
-        controls_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
-        controls_frame.pack_propagate(False)
-        
-        self._build_controls(controls_frame)
-        
-        # Right side: Scrollable display area
-        display_container = tk.Frame(outer_frame, bg=self.BG_COLOR)
-        display_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Create canvas for scrolling the display area
-        self.display_canvas = tk.Canvas(display_container, bg=self.BG_COLOR, highlightthickness=0)
-        display_scrollbar = ttk.Scrollbar(display_container, orient=tk.VERTICAL, 
-                                          command=self.display_canvas.yview)
-        
-        self.display_scrollable_frame = tk.Frame(self.display_canvas, bg=self.BG_COLOR)
-        
-        self.display_scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.display_canvas.configure(scrollregion=self.display_canvas.bbox("all"))
-        )
-        
-        self.display_canvas.create_window((0, 0), window=self.display_scrollable_frame, anchor="nw")
-        self.display_canvas.configure(yscrollcommand=display_scrollbar.set)
-        
-        # Bind mousewheel for scrolling display area
-        # Bind mousewheel for scrolling display area
-        def _on_display_mousewheel(event):
-            try:
-                if self.winfo_exists():
-                    self.display_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-            except (tk.TclError, AttributeError):
-                pass
-        
-        self.display_canvas.bind_all("<MouseWheel>", _on_display_mousewheel)
-        
-        display_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.display_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        self._build_display_area(self.display_scrollable_frame)
-        
-        # Status bar
-        self._build_status_bar()
-    
-    def _build_controls(self, parent):
-        """Build control panel."""
-        title_label = tk.Label(parent, text="[ INTEGRATED INSPECTOR ]",
-                              font=(self.FONT_FACE, 14, 'bold'),
-                              bg=self.BG_COLOR, fg=self.ACCENT_COLOR)
-        title_label.pack(pady=10)
-        
-        # Back to Main button
-        back_btn = tk.Button(parent, text="← Back to Main", 
-                            font=(self.FONT_FACE, 9),
-                            bg="#333333", fg=self.FG_COLOR,
-                            command=self._go_back_to_main)
-        back_btn.pack(fill=tk.X, padx=10, pady=(0, 5))
-        
-        # === IMAGE LOADING ===
-        load_frame = tk.Frame(parent, bg=self.BG_COLOR,
-                             highlightbackground=self.FG_COLOR, highlightthickness=1)
-        load_frame.pack(fill=tk.X, padx=10, pady=5)
-        
-        ttk.Label(load_frame, text="< IMAGE LOADING >").pack(pady=5)
-        
-        ttk.Button(load_frame, text="Load Golden Image",
-                  command=self._load_golden).pack(fill=tk.X, padx=5, pady=2)
-        self.golden_status = ttk.Label(load_frame, text="Not loaded", foreground="#888888")
-        self.golden_status.pack()
-        
-        ttk.Button(load_frame, text="Load Test Image",
-                  command=self._load_test).pack(fill=tk.X, padx=5, pady=2)
-        self.test_status = ttk.Label(load_frame, text="Not loaded", foreground="#888888")
-        self.test_status.pack(pady=(0, 5))
-        
-        # === ADVANCED SETTINGS ===
-        advanced_frame = tk.Frame(parent, bg=self.BG_COLOR,
-                                 highlightbackground=self.FG_COLOR, highlightthickness=1)
-        advanced_frame.pack(fill=tk.X, padx=10, pady=5)
-        
-        ttk.Label(advanced_frame, text="< ADVANCED SETTINGS >",
-                 foreground=self.ACCENT_COLOR).pack(pady=5)
-        
-        # Alignment method
-        align_row = tk.Frame(advanced_frame, bg=self.BG_COLOR)
-        align_row.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(align_row, text="Alignment:").pack(side=tk.LEFT)
-        
-        self.alignment_var = tk.StringVar(value="Auto")
-        alignment_combo = ttk.Combobox(align_row, textvariable=self.alignment_var,
-                                       values=["Auto", "Phase", "ORB", "SIFT", "ECC"],
-                                       state="readonly", width=12)
-        alignment_combo.pack(side=tk.LEFT, padx=5)
-        alignment_combo.bind("<<ComboboxSelected>>", self._on_alignment_change)
-        
-        # Light mode
-        light_row = tk.Frame(advanced_frame, bg=self.BG_COLOR)
-        light_row.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(light_row, text="Light Mode:").pack(side=tk.LEFT)
-        
-        self.light_mode_var = tk.StringVar(value="Auto")
-        light_combo = ttk.Combobox(light_row, textvariable=self.light_mode_var,
-                                   values=["Auto", "Low Light", "High Light", "HDR", "Standard", "Gold Pad"],
-                                   state="readonly", width=12)
-        light_combo.pack(side=tk.LEFT, padx=5)
-        light_combo.bind("<<ComboboxSelected>>", self._on_light_mode_change)
-        
-        # Inspection Mode (NEW)
-        inspect_row = tk.Frame(advanced_frame, bg=self.BG_COLOR)
-        inspect_row.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(inspect_row, text="Inspect Mode:").pack(side=tk.LEFT)
-        
-        self.inspect_mode_var = tk.StringVar(value="Pixel-wise")
-        inspect_combo = ttk.Combobox(inspect_row, textvariable=self.inspect_mode_var,
-                                     values=["Pixel-wise", "Template Match"],
-                                     state="readonly", width=12)
-        inspect_combo.pack(side=tk.LEFT, padx=5)
-        inspect_combo.bind("<<ComboboxSelected>>", self._on_inspect_mode_change)
-        
-        # Template grid size (only relevant for Template Match mode)
-        template_row = tk.Frame(advanced_frame, bg=self.BG_COLOR)
-        template_row.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(template_row, text="Template Grid:").pack(side=tk.LEFT)
-        
-        self.template_grid_var = tk.StringVar(value="4x4")
-        template_combo = ttk.Combobox(template_row, textvariable=self.template_grid_var,
-                                      values=["2x2", "3x3", "4x4", "5x5", "6x6", "8x8"],
-                                      state="readonly", width=12)
-        template_combo.pack(side=tk.LEFT, padx=5)
-        template_combo.bind("<<ComboboxSelected>>", self._on_template_grid_change)
-        
-        # Gamma slider
-        gamma_row = tk.Frame(advanced_frame, bg=self.BG_COLOR)
-        gamma_row.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(gamma_row, text="Gamma:").pack(side=tk.LEFT)
-        
-        self.gamma_slider = ttk.Scale(gamma_row, from_=0.5, to=2.0, orient=tk.HORIZONTAL,
-                                     command=self._on_gamma_change)
-        self.gamma_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.gamma_label = ttk.Label(gamma_row, text="1.00", width=4)
-        self.gamma_label.pack(side=tk.LEFT)
-        self.gamma_slider.set(1.0)
-        
-        # Illumination normalization
-        illum_row = tk.Frame(advanced_frame, bg=self.BG_COLOR)
-        illum_row.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(illum_row, text="Normalize:").pack(side=tk.LEFT)
-        
-        self.illum_var = tk.StringVar(value="Match Histogram")
-        illum_combo = ttk.Combobox(illum_row, textvariable=self.illum_var,
-                                   values=["Match Histogram", "CLAHE Both", "Normalize Both", "None"],
-                                   state="readonly", width=12)
-        illum_combo.pack(side=tk.LEFT, padx=5)
-        
-        # Alignment confidence display
-        self.align_confidence_label = ttk.Label(advanced_frame, 
-                                                text="Align Confidence: --",
-                                                foreground="#FFFF00")
-        self.align_confidence_label.pack(fill=tk.X, padx=5, pady=5)
-        
-        # === DETECTION THRESHOLDS ===
-        thresh_frame = tk.Frame(parent, bg=self.BG_COLOR,
-                               highlightbackground=self.FG_COLOR, highlightthickness=1)
-        thresh_frame.pack(fill=tk.X, padx=10, pady=5)
-        
-        ttk.Label(thresh_frame, text="< DETECTION THRESHOLDS >").pack(pady=5)
-        
-        # Pixel threshold with entry
-        pixel_row = tk.Frame(thresh_frame, bg=self.BG_COLOR)
-        pixel_row.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(pixel_row, text="Pixel Diff:", width=12).pack(side=tk.LEFT)
-        self.pixel_var = tk.IntVar(value=40)
-        self.pixel_slider = ttk.Scale(pixel_row, from_=10, to=100, orient=tk.HORIZONTAL,
-                                      variable=self.pixel_var, command=self._on_pixel_slider)
-        self.pixel_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        self.pixel_entry = ttk.Entry(pixel_row, textvariable=self.pixel_var, width=5)
-        self.pixel_entry.pack(side=tk.LEFT, padx=2)
-        self.pixel_entry.bind('<Return>', self._on_pixel_entry)
-        
-        # Count threshold with entry
-        count_row = tk.Frame(thresh_frame, bg=self.BG_COLOR)
-        count_row.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(count_row, text="Count Thresh:", width=12).pack(side=tk.LEFT)
-        self.count_var = tk.IntVar(value=5000)
-        self.count_slider = ttk.Scale(count_row, from_=100, to=10000, orient=tk.HORIZONTAL,
-                                      variable=self.count_var, command=self._on_count_slider)
-        self.count_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        self.count_entry = ttk.Entry(count_row, textvariable=self.count_var, width=5)
-        self.count_entry.pack(side=tk.LEFT, padx=2)
-        self.count_entry.bind('<Return>', self._on_count_entry)
-        
-        # Noise Reduction slider with entry (NEW)
-        noise_row = tk.Frame(thresh_frame, bg=self.BG_COLOR)
-        noise_row.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(noise_row, text="Noise Reduce:", width=12).pack(side=tk.LEFT)
-        self.noise_var = tk.IntVar(value=3)
-        self.noise_slider = ttk.Scale(noise_row, from_=0, to=15, orient=tk.HORIZONTAL,
-                                      variable=self.noise_var, command=self._on_noise_slider)
-        self.noise_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        self.noise_entry = ttk.Entry(noise_row, textvariable=self.noise_var, width=5)
-        self.noise_entry.pack(side=tk.LEFT, padx=2)
-        self.noise_entry.bind('<Return>', self._on_noise_entry)
-        
-        # Auto-crop checkbox
-        self.auto_crop_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(thresh_frame, text="Auto-Crop Substrate",
-                       variable=self.auto_crop_var).pack(fill=tk.X, padx=5, pady=2)
-        
-        # Gold Focus Mode checkbox (NEW) - Focus on gold pads, filter out green
-        self.gold_focus_var = tk.BooleanVar(value=True)  # Default ON for gold pad inspection
-        gold_focus_cb = ttk.Checkbutton(thresh_frame, text="🔶 Gold Focus (filter green)",
-                                        variable=self.gold_focus_var)
-        gold_focus_cb.pack(fill=tk.X, padx=5, pady=2)
-        
-        # === RUN BUTTON ===
-        run_btn = tk.Button(parent, text="▶ RUN INSPECTION",
-                           font=(self.FONT_FACE, 14, 'bold'),
-                           bg="#004400", fg=self.FG_COLOR,
-                           activebackground="#006600",
-                           command=self._run_inspection)
-        run_btn.pack(fill=tk.X, padx=10, pady=10)
-        
-        # === SAVE BUTTON ===
-        save_btn = tk.Button(parent, text="💾 SAVE RESULTS",
-                            font=(self.FONT_FACE, 12, 'bold'),
-                            bg="#444400", fg="#FFFF00",
-                            activebackground="#666600",
-                            command=self._save_results)
-        save_btn.pack(fill=tk.X, padx=10, pady=5)
-        
-        # === RESULTS ===
-        self.result_label = tk.Label(parent, text="RESULT: --",
-                                    font=(self.FONT_FACE, 16, 'bold'),
-                                    bg=self.BG_COLOR, fg="#888888")
-        self.result_label.pack(pady=10)
-        
-        # Stats display
-        self.stats_label = ttk.Label(parent, text="", justify=tk.LEFT)
-        self.stats_label.pack(fill=tk.X, padx=10)
-    def _build_display_area(self, parent):
-        """Build image display area as 2x3 grid using Canvases."""
-        # Row 1: Golden and Original Test
-        row1 = ttk.Frame(parent)
-        row1.pack(fill=tk.BOTH, expand=True, pady=2)
-        
-        # Golden image (1,1)
-        golden_frame = ttk.Frame(row1)
-        golden_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
-        ttk.Label(golden_frame, text="GOLDEN", font=('Consolas', 8)).pack()
-        self.golden_canvas = tk.Canvas(golden_frame, bg="#111111", highlightthickness=0)
-        self.golden_canvas.pack(fill=tk.BOTH, expand=True)
-        self._bind_canvas_events(self.golden_canvas)
-        
-        # Sample/Test image (1,2)
-        test_frame = ttk.Frame(row1)
-        test_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
-        ttk.Label(test_frame, text="SAMPLE", font=('Consolas', 8)).pack()
-        self.test_canvas = tk.Canvas(test_frame, bg="#111111", highlightthickness=0)
-        self.test_canvas.pack(fill=tk.BOTH, expand=True)
-        self._bind_canvas_events(self.test_canvas)
-        
-        # Row 2: Aligned and Anomaly Heatmap (center)
-        row2 = ttk.Frame(parent)
-        row2.pack(fill=tk.BOTH, expand=True, pady=1)
-        
-        # Aligned image (2,1)
-        aligned_frame = ttk.Frame(row2)
-        aligned_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
-        ttk.Label(aligned_frame, text="ALIGNED", font=('Consolas', 8)).pack()
-        self.aligned_canvas = tk.Canvas(aligned_frame, bg="#111111", highlightthickness=0)
-        self.aligned_canvas.pack(fill=tk.BOTH, expand=True)
-        self._bind_canvas_events(self.aligned_canvas)
-        
-        # ANOMALY HEATMAP (2,2)
-        anomaly_frame = ttk.Frame(row2)
-        anomaly_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
-        anomaly_title = tk.Label(anomaly_frame, text="⚠ ANOMALY ⚠",
-                                font=(self.FONT_FACE, 8, 'bold'),
-                                bg=self.BG_COLOR, fg="#FF4444")
-        anomaly_title.pack()
-        self.pixel_canvas = tk.Canvas(anomaly_frame, bg="#111111", highlightthickness=1, highlightbackground="#FF4444")
-        self.pixel_canvas.pack(fill=tk.BOTH, expand=True)
-        self._bind_canvas_events(self.pixel_canvas)
-        
-        # Row 3: SSIM and Contour Map
-        row3 = ttk.Frame(parent)
-        row3.pack(fill=tk.BOTH, expand=True, pady=1)
-        
-        # SSIM heatmap (3,1)
-        ssim_frame = ttk.Frame(row3)
-        ssim_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
-        ttk.Label(ssim_frame, text="SSIM", font=('Consolas', 8)).pack()
-        self.ssim_canvas = tk.Canvas(ssim_frame, bg="#111111", highlightthickness=0)
-        self.ssim_canvas.pack(fill=tk.BOTH, expand=True)
-        self._bind_canvas_events(self.ssim_canvas)
-        
-        # Contour Map (3,2)
-        contour_frame = ttk.Frame(row3)
-        contour_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
-        ttk.Label(contour_frame, text="CONTOUR", font=('Consolas', 8)).pack()
-        self.contour_canvas = tk.Canvas(contour_frame, bg="#111111", highlightthickness=0)
-        self.contour_canvas.pack(fill=tk.BOTH, expand=True)
-        self._bind_canvas_events(self.contour_canvas)
-
-    def _bind_canvas_events(self, canvas):
-        canvas.bind("<Motion>", self._on_mouse_move)
-        canvas.bind("<Leave>", self._on_mouse_leave)
-    
-    def _build_status_bar(self):
-        # Stats display
-        self.status_var = tk.StringVar(value="Ready")
-        
-        status_frame = tk.Frame(self, bg="#222222")
-        status_frame.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        status_label = tk.Label(status_frame, textvariable=self.status_var,
-                              bg="#222222", fg=self.FG_COLOR,
-                              font=(self.FONT_FACE, 9), anchor=tk.W)
-        status_label.pack(side=tk.LEFT, padx=5)
-        
-        self.lbl_coords = tk.Label(status_frame, text="XY: -",
-                                 bg="#222222", fg="#00FFFF",
-                                 font=(self.FONT_FACE, 9, 'bold'))
-        self.lbl_coords.pack(side=tk.RIGHT, padx=10)
-    
-    # === EVENT HANDLERS ===
-    
-    def _on_alignment_change(self, event=None):
-        """Handle alignment method change."""
-        mapping = {
-            "Auto": AlignmentMethod.AUTO,
-            "Phase": AlignmentMethod.PHASE_CORRELATION,
-            "ORB": AlignmentMethod.ORB_HOMOGRAPHY,
-            "SIFT": AlignmentMethod.SIFT_HOMOGRAPHY,
-            "ECC": AlignmentMethod.ECC
-        }
-        self.selected_alignment_method = mapping.get(self.alignment_var.get(), AlignmentMethod.AUTO)
-    
-    def _on_light_mode_change(self, event=None):
-        """Handle light mode change."""
-        mapping = {
-            "Auto": LightSensitivityMode.AUTO,
-            "Low Light": LightSensitivityMode.LOW_LIGHT,
-            "High Light": LightSensitivityMode.HIGH_LIGHT,
-            "HDR": LightSensitivityMode.HDR,
-            "Standard": LightSensitivityMode.STANDARD,
-            "Gold Pad": LightSensitivityMode.GOLD_PAD
-        }
-        self.selected_light_mode = mapping.get(self.light_mode_var.get(), LightSensitivityMode.AUTO)
-    
-    def _on_inspect_mode_change(self, event=None):
-        """Handle inspection mode change."""
-        mapping = {
-            "Pixel-wise": InspectionMode.PIXEL_WISE,
-            "Template Match": InspectionMode.TEMPLATE_MATCH
-        }
-        self.selected_inspection_mode = mapping.get(self.inspect_mode_var.get(), InspectionMode.PIXEL_WISE)
-    
-    def _on_template_grid_change(self, event=None):
-        """Handle template grid size change."""
-        grid_str = self.template_grid_var.get()
-        try:
-            cols, rows = map(int, grid_str.split('x'))
-            self.template_grid_cols = cols
-            self.template_grid_rows = rows
-        except ValueError:
-            self.template_grid_cols = 4
-            self.template_grid_rows = 4
-    
-    def _on_gamma_change(self, value):
-        """Handle gamma slider change."""
-        self.gamma_value = float(value)
-        self.gamma_label.config(text=f"{self.gamma_value:.2f}")
-    
-    def _on_pixel_slider(self, value):
-        """Handle pixel slider change - update variable."""
-        self.pixel_var.set(int(float(value)))
-    
-    def _on_pixel_entry(self, event=None):
-        """Handle pixel entry - clamp value to valid range."""
-        try:
-            val = int(self.pixel_var.get())
-            val = max(10, min(100, val))  # Clamp to 10-100
-            self.pixel_var.set(val)
-        except ValueError:
-            self.pixel_var.set(40)  # Default
-    
-    def _on_count_slider(self, value):
-        """Handle count slider change - update variable."""
-        self.count_var.set(int(float(value)))
-    
-    def _on_count_entry(self, event=None):
-        """Handle count entry - clamp value to valid range."""
-        try:
-            val = int(self.count_var.get())
-            val = max(100, min(10000, val))  # Clamp to 100-10000
-            self.count_var.set(val)
-        except ValueError:
-            self.count_var.set(5000)  # Default
-    
-    def _on_noise_slider(self, value):
-        """Handle noise slider change - update variable."""
-        self.noise_var.set(int(float(value)))
-    
-    def _on_noise_entry(self, event=None):
-        """Handle noise entry - clamp value to valid range."""
-        try:
-            val = int(self.noise_var.get())
-            val = max(0, min(15, val))  # Clamp to 0-15
-            self.noise_var.set(val)
-        except ValueError:
-            self.noise_var.set(3)  # Default
-    
-    # === IMAGE LOADING ===
-    
-    def _load_golden(self):
-        """Load golden/master image."""
-        path = filedialog.askopenfilename(
-            title="Select Golden Image",
-            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff")]
-        )
-        if path:
-            try:
-                self.golden_image = read_image(path)
-                self._golden_loaded = True
-                self.last_golden_path = path
-                self.golden_status.config(text=os.path.basename(path), foreground=self.FG_COLOR)
-                self._display_on_canvas(self.golden_image, self.golden_canvas)
-                self.status_var.set(f"Loaded golden: {os.path.basename(path)}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load image: {e}")
-    
-    def _load_test(self):
-        """Load test image."""
-        path = filedialog.askopenfilename(
-            title="Select Test Image",
-            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff")]
-        )
-        if path:
-            try:
-                self.test_image = read_image(path)
-                self._test_loaded = True
-                self.last_test_path = path
-                self.test_status.config(text=os.path.basename(path), foreground=self.FG_COLOR)
-                self._display_on_canvas(self.test_image, self.test_canvas)  # Show test image immediately
-                self.status_var.set(f"Loaded test: {os.path.basename(path)}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load image: {e}")
-    
-    # === INSPECTION ===
-    
-    def _run_inspection(self):
-        """Run the inspection pipeline."""
-        if not self._golden_loaded or self.golden_image is None:
-            messagebox.showwarning("Missing Image", "Please load a Golden Image first.")
-            return
-        if not self._test_loaded or self.test_image is None:
-            messagebox.showwarning("Missing Image", "Please load a Test Image first.")
-            return
-        
-        start_time = time.time()
-        self.status_var.set("Running inspection...")
-        self.update_idletasks()
-        
-        try:
-            # Apply light sensitivity
-            light_config = LightSensitivityConfig(mode=self.selected_light_mode, gamma=self.gamma_value)
-            golden_proc = apply_light_sensitivity_mode(self.golden_image, self.selected_light_mode, light_config)
-            test_proc = apply_light_sensitivity_mode(self.test_image, self.selected_light_mode, light_config)
-            
-            # Auto-crop if enabled
-            if self.auto_crop_var.get():
-                golden_crops = run_edge_detection(golden_proc)
-                if golden_crops:
-                    golden_proc = golden_crops[0]
-                test_crops = run_edge_detection(test_proc)
-                if test_crops:
-                    test_proc = test_crops[0]
-            
-            # Resize test to match golden
-            h, w = golden_proc.shape[:2]
-            test_resized = cv2.resize(test_proc, (w, h))
-            
-            # Alignment
-            self.status_var.set(f"Aligning with {self.selected_alignment_method.value}...")
-            self.update_idletasks()
-            
-            aligned, (dx, dy), confidence, valid_mask = align_images(
-                golden_proc, test_resized,
-                method=self.selected_alignment_method
-            )
-            
-            self.aligned_image = aligned
-            self.align_confidence_label.config(
-                text=f"Align Confidence: {confidence:.3f} ({self.selected_alignment_method.value})"
-            )
-            
-            if confidence < 0.1:
-                self.result_label.config(text="RESULT: ALIGN ERROR", fg=self.ERROR_COLOR)
-                self.status_var.set("Alignment failed - low confidence")
-                return
-            
-            self._display_on_canvas(aligned, self.aligned_canvas)
-            
-            # SSIM check
-            self.status_var.set("Running SSIM check...")
-            self.update_idletasks()
-            
-            self.ssim_score, ssim_heatmap = calc_ssim(golden_proc, aligned)
-            self._display_on_canvas(ssim_heatmap, self.ssim_canvas)
-            
-            if self.ssim_score > self.SSIM_PASS_THRESHOLD:
-                # SSIM pass
-                processing_time = time.time() - start_time
-                self.result_label.config(text="RESULT: NORMAL (SSIM)", fg=self.FG_COLOR)
-                self.stats_label.config(
-                    text=f"SSIM Score: {self.ssim_score:.4f}\nThreshold: {self.SSIM_PASS_THRESHOLD}\nTime: {processing_time:.2f}s"
-                )
-                self.status_var.set(f"Complete: NORMAL (SSIM Pass) in {processing_time:.2f}s")
-                
-                # Store results for saving
-                self.last_result = {
-                    'verdict': 'Normal',
-                    'method': 'SSIM',
-                    'ssim_score': self.ssim_score,
-                    'processing_time': processing_time
-                }
-                self.last_ssim_heatmap = ssim_heatmap
-                self.last_heatmap = None
-                self.last_contour_map = None
-                
-                # Clear pixel heatmap
-                blank = np.zeros((100, 100, 3), dtype=np.uint8)
-                cv2.putText(blank, "N/A", (30, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-                self._display_on_canvas(blank, self.pixel_canvas)
-                return
-            
-            self.status_var.set("Running analysis...")
-            self.update_idletasks()
-            
-            illum_method_map = {
-                "Match Histogram": "match_histogram",
-                "CLAHE Both": "clahe_both",
-                "Normalize Both": "normalize_both",
-                "None": "none"
-            }
-            normalize_method = illum_method_map.get(self.illum_var.get(), "match_histogram")
-            
-            # Apply noise reduction if enabled
-            noise_level = self.noise_var.get()
-            golden_for_match = golden_proc
-            aligned_for_match = aligned
-            
-            if noise_level > 0:
-                # Apply Gaussian blur for noise reduction
-                kernel_size = noise_level * 2 + 1  # Ensure odd kernel size
-                golden_for_match = cv2.GaussianBlur(golden_proc, (kernel_size, kernel_size), 0)
-                aligned_for_match = cv2.GaussianBlur(aligned, (kernel_size, kernel_size), 0)
-            
-            # Gold Focus Mode - Create mask to focus on gold regions only
-            gold_mask = None
-            if self.gold_focus_var.get():
-                self.status_var.set("Creating gold region mask (filtering green)...")
-                self.update_idletasks()
-                
-                # Get gold mask from golden image (HSV filter for gold color)
-                gold_mask = gold_pad_hsv_filter(golden_for_match, 
-                                                 hue_low=10, hue_high=45,  # Wider range for gold/yellow
-                                                 sat_low=30, sat_high=255,
-                                                 val_low=100, val_high=255,
-                                                 return_mask=True)
-                
-                # Clean up mask with morphological operations
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                gold_mask = cv2.morphologyEx(gold_mask, cv2.MORPH_CLOSE, kernel)
-                gold_mask = cv2.morphologyEx(gold_mask, cv2.MORPH_OPEN, kernel)
-                
-                # Combine with valid_mask if exists
-                if valid_mask is not None:
-                    valid_mask = cv2.bitwise_and(valid_mask, gold_mask)
-                else:
-                    valid_mask = gold_mask
-            
-            # Branch based on inspection mode
-            if self.selected_inspection_mode == InspectionMode.TEMPLATE_MATCH:
-                # Template matching mode
-                self.status_var.set(f"Running template matching ({self.template_grid_cols}x{self.template_grid_rows} grid)...")
-                self.update_idletasks()
-                
-                template_config = TemplateMatchConfig(
-                    grid_cols=self.template_grid_cols,
-                    grid_rows=self.template_grid_rows,
-                    search_margin=self.template_search_margin,
-                    diff_threshold=self.pixel_var.get(),
-                    min_anomaly_area=self.count_var.get()
-                )
-                
-                pixel_result = run_template_inspection(
-                    golden_for_match, aligned_for_match, template_config
-                )
-                
-                # Map template result to common format
-                pixel_result['contour_map'] = pixel_result['annotated_image']
-                pixel_result['anomaly_mask'] = pixel_result.get('anomaly_mask', np.zeros_like(golden_proc[:,:,0]))
-                
-            else:
-                # Pixel-wise mode (original)
-                self.status_var.set("Running pixel analysis...")
-                self.update_idletasks()
-                
-                pixel_result = run_pixel_matching(
-                    golden_for_match, aligned_for_match,
-                    pixel_thresh=self.pixel_var.get(),
-                    count_thresh=self.count_var.get(),
-                    valid_area_mask=valid_mask,
-                    normalize_lighting=normalize_method != "none",
-                    normalize_method=normalize_method
-                )
-            
-            # Annotate with anomaly locations if anomaly detected
-            if pixel_result['verdict'] == 'Anomaly':
-                self.anomaly_mapper.analyze_mask(pixel_result['anomaly_mask'])
-                contour_map = self.anomaly_mapper.create_annotated_image(pixel_result['contour_map'])
-            else:
-                contour_map = pixel_result['contour_map']
-            
-            self._display_on_canvas(pixel_result['heatmap'], self.pixel_canvas)
-            self._display_on_canvas(contour_map, self.contour_canvas)  # Display contour map in dedicated panel
-            
-            # Final result
-            processing_time = time.time() - start_time
-            
-            if pixel_result['verdict'] == 'Anomaly':
-                self.result_label.config(text="RESULT: !! ANOMALY !!", fg=self.ERROR_COLOR)
-                location_text = self.anomaly_mapper.get_summary_text()
-            else:
-                self.result_label.config(text="RESULT: NORMAL", fg=self.FG_COLOR)
-                location_text = ""
-            
-            stats_text = (
-                f"Verdict: {pixel_result['verdict']}\n"
-                f"SSIM: {self.ssim_score:.4f}\n"
-                f"Area Score: {pixel_result['area_score']:.2f}%\n"
-                f"Anomaly Count: {pixel_result['anomaly_count']}\n"
-                f"Confidence: {pixel_result['confidence']:.3f}\n"
-                f"Time: {processing_time:.2f}s"
-            )
-            if location_text:
-                stats_text += f"\n\n{location_text}"
-            
-            self.stats_label.config(text=stats_text)
-            self.status_var.set(f"Complete: {pixel_result['verdict']} in {processing_time:.2f}s")
-            
-            # Log result
-            self._log_result(
-                "test_image",
-                pixel_result['verdict'],
-                pixel_result['area_score'],
-                pixel_result['anomaly_count'],
-                pixel_result['verdict'],
-                processing_time,
-                self.ssim_score
-            )
-            
-            # Store results for saving
-            self.last_result = {
-                'verdict': pixel_result['verdict'],
-                'method': 'Pixel Matching',
-                'ssim_score': self.ssim_score,
-                'area_score': pixel_result['area_score'],
-                'anomaly_count': pixel_result['anomaly_count'],
-                'confidence': pixel_result['confidence'],
-                'processing_time': processing_time,
-                'location_summary': location_text if location_text else None
-            }
-            self.last_heatmap = pixel_result['heatmap']
-            self.last_contour_map = contour_map
-            self.last_ssim_heatmap = ssim_heatmap
-            
-        except Exception as e:
-            self.result_label.config(text="RESULT: ERROR", fg=self.ERROR_COLOR)
-            self.status_var.set(f"Error: {str(e)}")
-            messagebox.showerror("Inspection Error", str(e))
-    
-    def _display_on_canvas(self, cv2_image: np.ndarray, canvas: tk.Canvas, size=(450, 350)):
-        """Display OpenCV image on tkinter Canvas with centering and metadata storage."""
-        if cv2_image is None or cv2_image.size == 0:
-            return
-        
-        h, w = cv2_image.shape[:2]
-        if h == 0 or w == 0:
-            return
-        
-        # 1. Calculate Resize Ratio
-        # Canvas size might change, but let's assume fixed size passed or check widget size?
-        # Better to check widget size if mapped, else use default 'size' param
-        cw = canvas.winfo_width()
-        ch = canvas.winfo_height()
-        if cw > 10 and ch > 10:
-            size = (cw, ch)
-
-        ratio = min(size[0]/w, size[1]/h)
-        new_w, new_h = int(w * ratio), int(h * ratio)
-        
-        if new_w <= 0 or new_h <= 0:
-            return
-        
-        # 2. Resize
-        img_resized = cv2.resize(cv2_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        
-        if len(img_resized.shape) == 2:
-            img_resized = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2BGR)
-        
-        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-        photo = ImageTk.PhotoImage(image=Image.fromarray(img_rgb))
-        
-        # 3. Calculate Offsets to Center
-        off_x = (size[0] - new_w) // 2
-        off_y = (size[1] - new_h) // 2
-        
-        # 4. Draw on Canvas
-        canvas.delete("all") # Clear previous
-        canvas.create_image(off_x + new_w//2, off_y + new_h//2, image=photo, anchor="center", tags="img")
-        canvas.image = photo # Keep reference
-        
-        # 5. Store Metadata
-        self.canvas_meta[canvas] = {
-            "ratio": ratio,
-            "off_x": off_x,
-            "off_y": off_y,
-            "orig_w": w,
-            "orig_h": h,
-            "disp_w": new_w,
-            "disp_h": new_h
-        }
-
-    def _on_mouse_move(self, event):
-        """Handle mouse movement on canvases to update coordinates and crosshairs."""
-        canvas = event.widget
-        if canvas not in self.canvas_meta:
-            return
-            
-        meta = self.canvas_meta[canvas]
-        
-        # Get mouse pos relative to canvas
-        mx, my = event.x, event.y
-        
-        # Convert to Image Coords
-        # 1. Remove offset
-        img_x = mx - meta["off_x"]
-        img_y = my - meta["off_y"]
-        
-        # 2. Check bounds relative to displayed image
-        if 0 <= img_x < meta["disp_w"] and 0 <= img_y < meta["disp_h"]:
-             # 3. Scale back to original
-            orig_x = int(img_x / meta["ratio"])
-            orig_y = int(img_y / meta["ratio"])
-            
-            # Clamp
-            orig_x = max(0, min(orig_x, meta["orig_w"] - 1))
-            orig_y = max(0, min(orig_y, meta["orig_h"] - 1))
-            
-            self.lbl_coords.config(text=f"XY: {orig_x}, {orig_y}")
-            
-            # Draw Crosshair on THIS canvas
-            self._draw_crosshair(canvas, mx, my)
-            
-            # OPTIONAL: Sync crosshairs on other canvases if they have same dimensions?
-            # For now, just show on active canvas to avoid confusion with different sizes
-        else:
-            self.lbl_coords.config(text="XY: -")
-            canvas.delete("crosshair")
-
-    def _on_mouse_leave(self, event):
-        """Clear coordinates and crosshair when leaving canvas."""
-        self.lbl_coords.config(text="XY: -")
-        event.widget.delete("crosshair")
-
-    def _draw_crosshair(self, canvas, x, y):
-        """Draw simple crosshair on canvas."""
-        canvas.delete("crosshair")
-        w = canvas.winfo_width()
-        h = canvas.winfo_height()
-        
-        color = "#00FFFF" # Cyan
-        
-        # Horizontal
-        canvas.create_line(0, y, w, y, fill=color, dash=(4, 2), tags="crosshair")
-        # Vertical
-        canvas.create_line(x, 0, x, h, fill=color, dash=(4, 2), tags="crosshair")
-    
-    def _log_result(self, test_path, verdict, p_score, p_count, p_verdict, p_time, ssim_score):
-        """Log inspection result to CSV."""
-        with open(self.log_file, 'a', newline='') as f:
-            writer = csv.writer(f)
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            writer.writerow([timestamp, os.path.basename(test_path), verdict,
-                           f"{p_score:.4f}", p_count, p_verdict,
-                           f"{ssim_score:.4f}", f"{p_time:.2f}"])
-    
-    def _save_results(self):
-        """Save inspection results to a folder."""
-        import json
-        from datetime import datetime
-        
-        if self.last_result is None:
-            messagebox.showwarning("No Results", "No inspection results to save. Run an inspection first.")
-            return
-        
-        # Ask user for output folder
-        output_dir = filedialog.askdirectory(title="Select Output Folder for Results")
-        if not output_dir:
-            return
-        
-        try:
-            # Create timestamped subfolder
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            result_folder = os.path.join(output_dir, f"inspection_{timestamp}")
-            os.makedirs(result_folder, exist_ok=True)
-            
-            self.status_var.set("Saving results...")
-            self.update_idletasks()
-            
-            saved_files = []
-            
-            # Save aligned image
-            if self.aligned_image is not None:
-                aligned_path = os.path.join(result_folder, "aligned_test.png")
-                cv2.imwrite(aligned_path, self.aligned_image)
-                saved_files.append("aligned_test.png")
-            
-            # Save golden image
-            if self.golden_image is not None:
-                golden_path = os.path.join(result_folder, "golden_reference.png")
-                cv2.imwrite(golden_path, self.golden_image)
-                saved_files.append("golden_reference.png")
-            
-            # Save sample/test image (original, before alignment)
-            if self.test_image is not None:
-                sample_path = os.path.join(result_folder, "sample_test.png")
-                cv2.imwrite(sample_path, self.test_image)
-                saved_files.append("sample_test.png")
-            
-            # Save SSIM heatmap
-            if self.last_ssim_heatmap is not None:
-                ssim_path = os.path.join(result_folder, "ssim_heatmap.png")
-                cv2.imwrite(ssim_path, self.last_ssim_heatmap)
-                saved_files.append("ssim_heatmap.png")
-            
-            # Save anomaly heatmap
-            if self.last_heatmap is not None:
-                heatmap_path = os.path.join(result_folder, "anomaly_heatmap.png")
-                cv2.imwrite(heatmap_path, self.last_heatmap)
-                saved_files.append("anomaly_heatmap.png")
-            
-            # Save contour map with annotations
-            if self.last_contour_map is not None:
-                contour_path = os.path.join(result_folder, "contour_map.png")
-                cv2.imwrite(contour_path, self.last_contour_map)
-                saved_files.append("contour_map.png")
-            
-            # Save JSON results
-            json_result = {
-                'timestamp': datetime.now().isoformat(),
-                'golden_image': os.path.basename(self.last_golden_path) if self.last_golden_path else None,
-                'test_image': os.path.basename(self.last_test_path) if self.last_test_path else None,
-                **self.last_result,
-                'settings': {
-                    'alignment_method': self.selected_alignment_method.value,
-                    'light_mode': self.selected_light_mode.value,
-                    'gamma': self.gamma_value,
-                    'pixel_threshold': int(self.pixel_slider.get()),
-                    'count_threshold': int(self.count_slider.get())
-                },
-                'saved_files': saved_files
-            }
-            
-            json_path = os.path.join(result_folder, "inspection_results.json")
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(json_result, f, indent=2, ensure_ascii=False)
-            saved_files.append("inspection_results.json")
-            
-            # Save summary text file
-            summary_path = os.path.join(result_folder, "summary.txt")
-            with open(summary_path, 'w', encoding='utf-8') as f:
-                f.write("INSPECTION RESULTS SUMMARY\n")
-                f.write("=" * 50 + "\n\n")
-                f.write(f"Timestamp: {json_result['timestamp']}\n")
-                f.write(f"Golden Image: {json_result['golden_image']}\n")
-                f.write(f"Test Image: {json_result['test_image']}\n\n")
-                f.write(f"Verdict: {self.last_result['verdict']}\n")
-                f.write(f"Method: {self.last_result['method']}\n")
-                f.write(f"SSIM Score: {self.last_result.get('ssim_score', 'N/A')}\n")
-                if 'area_score' in self.last_result:
-                    f.write(f"Area Score: {self.last_result['area_score']:.2f}%\n")
-                    f.write(f"Anomaly Count: {self.last_result['anomaly_count']}\n")
-                    f.write(f"Confidence: {self.last_result['confidence']:.3f}\n")
-                f.write(f"Processing Time: {self.last_result['processing_time']:.2f}s\n")
-                if self.last_result.get('location_summary'):
-                    f.write(f"\nAnomaly Locations:\n{self.last_result['location_summary']}\n")
-            saved_files.append("summary.txt")
-            
-            self.status_var.set(f"Results saved to: {result_folder}")
-            messagebox.showinfo("Results Saved", 
-                f"Inspection results saved successfully!\n\n"
-                f"Location: {result_folder}\n\n"
-                f"Files saved:\n" + "\n".join(f"• {f}" for f in saved_files))
-                
-        except Exception as e:
-            self.status_var.set(f"Error saving: {str(e)}")
-            messagebox.showerror("Save Error", f"Failed to save results: {str(e)}")
 
 
 # ==============================================================================
@@ -2578,6 +1412,7 @@ class PresetConfigWindow(tk.Toplevel):
         self.thresh = tk.DoubleVar()
         self.block = tk.IntVar()
         self.c_val = tk.IntVar()
+        self.defect_pct = tk.DoubleVar()
         
         self._build_ui()
         self._load_preset_values()
@@ -2615,6 +1450,9 @@ class PresetConfigWindow(tk.Toplevel):
         
         # C Constant
         self._add_slider(controls_frame, "C Constant (Adaptive)", self.c_val, -10, 20, 1)
+
+        # Defect Percentage
+        self._add_slider(controls_frame, "Defect % Threshold", self.defect_pct, 0.5, 50.0, 0.5)
         
         # Buttons
         btn_frame = tk.Frame(self, bg="#1e1e1e")
@@ -2654,6 +1492,7 @@ class PresetConfigWindow(tk.Toplevel):
             self.thresh.set(p["thresh"])
             self.block.set(p["block"])
             self.c_val.set(p["c"])
+            self.defect_pct.set(p.get("defect_pct", 10.0))
             
     def _save(self):
         # Update current working copy
@@ -2662,7 +1501,8 @@ class PresetConfigWindow(tk.Toplevel):
             "sigma": round(self.sigma.get(), 2),
             "thresh": round(self.thresh.get(), 2),
             "block": int(self.block.get()),
-            "c": int(self.c_val.get())
+            "c": int(self.c_val.get()),
+            "defect_pct": round(self.defect_pct.get(), 1)
         }
         # Pass back to parent
         self.on_save(self.presets)
@@ -2686,17 +1526,18 @@ class InspectorApp(tk.Tk):
     
 
     
-    BG_COLOR = "#000000"
-    FG_COLOR = "#00FFFF"  # Cyan
-    ACCENT_COLOR = "#00FFFF"
-    FONT_FACE = "Consolas"
+    BG_COLOR = DARK_THEME.BG_MAIN
+    FG_COLOR = DARK_THEME.FG_PRIMARY
+    ACCENT_COLOR = DARK_THEME.ACCENT_INFO
+    FONT_FACE = DARK_THEME.FONT_MAIN[0]
     
     # Preset Definitions (now includes noise and defect_pct)
     DEFECT_PRESETS = {
-        "General":   {"sigma": 1.2, "thresh": 0.65, "block": 11, "c": 2, "noise": 3, "defect_pct": 10.0},
-        "Scratches": {"sigma": 0.8, "thresh": 0.60, "block": 7,  "c": 2, "noise": 2, "defect_pct": 5.0},
-        "Stains":    {"sigma": 2.0, "thresh": 0.70, "block": 25, "c": 4, "noise": 4, "defect_pct": 15.0},
-        "Pinholes":  {"sigma": 0.8, "thresh": 0.60, "block": 9,  "c": 5, "noise": 2, "defect_pct": 3.0}
+        "General":   {"sigma": 1.1, "thresh": 0.65, "block": 11, "c": 2, "defect_pct": 10.0},
+        "Scratches": {"sigma": 0.8, "thresh": 0.60, "block": 7,  "c": 2, "defect_pct": 5.0},
+        "Stains":    {"sigma": 2.0, "thresh": 0.70, "block": 25, "c": 4, "defect_pct": 15.0},
+        "Pinholes":  {"sigma": 0.8, "thresh": 0.60, "block": 9,  "c": 5, "defect_pct": 3.0},
+        "irregular": {"sigma": 1.2, "thresh": 0.70, "block": 15, "c": 3, "defect_pct": 20.0}
     }
     
     SUPPORTED_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".bitmap", ".dib")
@@ -2707,19 +1548,17 @@ class InspectorApp(tk.Tk):
         self.title("Integrated PCB Inspector")
         self.geometry("1600x1000")
         self.state('zoomed')
-        self.configure(bg=self.BG_COLOR)
+        self.configure(bg=DARK_THEME.BG_MAIN)
         
         # State
         self.input_folder = tk.StringVar(value="")
         self.output_folder = tk.StringVar(value="")
         self.sigma = tk.DoubleVar(value=1.2)
         self.thresh = tk.DoubleVar(value=0.65)
-        self.use_otsu = tk.BooleanVar(value=True)  # Auto Otsu mode ON by default
         self.use_adaptive = tk.BooleanVar(value=False)  # Adaptive thresholding
         self.adaptive_block_size = tk.IntVar(value=11)  # Block size for adaptive
         self.adaptive_c = tk.IntVar(value=2)  # C constant for adaptive
         self.black_defect_pct = tk.DoubleVar(value=10.0)
-        self.noise_level = tk.IntVar(value=3)  # Morphological noise reduction (0-10)
         
         # New Feature State
         self.filter_method = tk.StringVar(value="Gaussian")
@@ -2733,7 +1572,20 @@ class InspectorApp(tk.Tk):
         
         self.current_image = None
         self.current_alpha = None
+        self.current_image = None
+        self.current_alpha = None
         self.current_bw = None
+        self.current_mask_bool = None # Cache for fast updates
+        self.files = [] # Initialize files list
+        
+        # Roboflow Client
+        # Roboflow Client
+        self.client = InferenceHTTPClient(
+            api_url="https://serverless.roboflow.com",
+            api_key="wIxP1NaMNv7xs6nFf1Of"
+        )
+        self.model_id = "single_gold_pad_binart/2"
+        self.classification_result = None
         
         # Canvas metadata for coordinate tracking: {canvas: (ratio, off_x, off_y, orig_w, orig_h)}
         self.canvas_meta = {}
@@ -2751,17 +1603,17 @@ class InspectorApp(tk.Tk):
         style.theme_use('clam')
         
         # Base styles
-        style.configure("TLabel", background=self.BG_COLOR, foreground=self.FG_COLOR,
-                       font=(self.FONT_FACE, 10))
-        style.configure("TButton", background="#333333", foreground=self.FG_COLOR,
-                       font=(self.FONT_FACE, 10, 'bold'))
-        style.configure("TFrame", background=self.BG_COLOR)
-        style.configure("TCheckbutton", background=self.BG_COLOR, foreground=self.FG_COLOR)
+        style.configure("TLabel", background=DARK_THEME.BG_MAIN, foreground=DARK_THEME.FG_PRIMARY,
+                       font=DARK_THEME.FONT_MAIN)
+        style.configure("TButton", background=DARK_THEME.BG_PANEL, foreground=DARK_THEME.FG_PRIMARY,
+                       font=DARK_THEME.FONT_BOLD)
+        style.configure("TFrame", background=DARK_THEME.BG_MAIN)
+        style.configure("TCheckbutton", background=DARK_THEME.BG_MAIN, foreground=DARK_THEME.FG_PRIMARY)
         
         # Blue (Cyan) button style for folder selection
         style.configure("Blue.TButton", 
                        background="#0088AA", foreground="#FFFFFF",
-                       font=(self.FONT_FACE, 10, 'bold'))
+                       font=DARK_THEME.FONT_BOLD)
         style.map("Blue.TButton",
                  background=[("active", "#00AACC"), ("pressed", "#006688")])
     
@@ -2773,8 +1625,6 @@ class InspectorApp(tk.Tk):
         # Tools menu
         tools_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Tools", menu=tools_menu)
-        tools_menu.add_command(label="📊 Pixel Inspection (Hiatus)", command=self._open_pixel_inspection_window)
-        tools_menu.add_separator()
         tools_menu.add_command(label="🔲 QR Code Extractor", command=self._open_qr_cropper)
         tools_menu.add_command(label="🔶 Gold Pad Extractor", command=self._open_gold_pad_extractor)
         tools_menu.add_command(label="🔴 Red Pad Extractor", command=self._open_red_pad_extractor)
@@ -2902,8 +1752,23 @@ class InspectorApp(tk.Tk):
         
         ttk.Label(folder_frame, text="< FOLDERS >", foreground=self.ACCENT_COLOR).pack(pady=5)
         
+        
         ttk.Button(folder_frame, text="Select Input Folder", style="Blue.TButton",
                   command=self._select_input).pack(fill=tk.X, padx=5, pady=2)
+        
+        # [NEW] Single Image Button with Special Decor (Gold/Warning Style)
+        # We'll use a custom style or just a simple button if ttk logic is complex
+        # Let's make a new style for it
+        style = ttk.Style()
+        style.configure("Gold.TButton", 
+                       background="#FFD700", foreground="#000000",
+                       font=(self.FONT_FACE, 9, 'bold'))
+        style.map("Gold.TButton",
+                 background=[("active", "#FFEE00"), ("pressed", "#CCAA00")])
+                 
+        ttk.Button(folder_frame, text="📄 Select Single Image", style="Gold.TButton",
+                  command=self._select_single_image).pack(fill=tk.X, padx=5, pady=2)
+
         self.input_label = ttk.Label(folder_frame, text="Not selected", foreground="#888888")
         self.input_label.pack(pady=(0, 5))
         
@@ -2941,12 +1806,14 @@ class InspectorApp(tk.Tk):
         # Config Button (Gear)
         ttk.Button(preset_row, text="⚙", width=3, command=self._open_preset_config).pack(side=tk.LEFT)
         
-        # Auto Otsu checkbox
-        otsu_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
-        otsu_row.pack(fill=tk.X, padx=5, pady=3)
-        self.otsu_check = ttk.Checkbutton(otsu_row, text="🔄 Auto (Triangle) - Global threshold",
-                                          variable=self.use_otsu, command=self._on_threshold_mode_change)
-        self.otsu_check.pack(anchor=tk.W)
+        # [NEW] Classification
+        class_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
+        class_row.pack(fill=tk.X, padx=5, pady=3)
+        ttk.Button(class_row, text="🤖 Classify & Tune", command=self._classify_and_tune).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.class_label = ttk.Label(class_row, text="", foreground="#FFFF00", font=("Consolas", 8))
+        self.class_label.pack(side=tk.LEFT, padx=5)
+        
+        
         
         # Adaptive thresholding checkbox
         adaptive_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
@@ -3011,15 +1878,7 @@ class InspectorApp(tk.Tk):
         self.thresh_label = ttk.Label(thresh_row, text="0.65", width=5)
         self.thresh_label.pack(side=tk.LEFT)
 
-        # Noise Reduction slider
-        noise_row = tk.Frame(settings_frame, bg=self.BG_COLOR)
-        noise_row.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(noise_row, text="Stabilization:", width=12).pack(side=tk.LEFT)
-        self.noise_scale = ttk.Scale(noise_row, from_=0, to=10, variable=self.noise_level,
-                                     command=self._on_manual_change)
-        self.noise_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.noise_label = ttk.Label(noise_row, textvariable=self.noise_level, width=3)
-        self.noise_label.pack(side=tk.LEFT)
+
         
         
         
@@ -3071,8 +1930,10 @@ class InspectorApp(tk.Tk):
         defect_row.pack(fill=tk.X, padx=5, pady=2)
         ttk.Label(defect_row, text="DEFECT if black% >").pack(side=tk.LEFT)
         self.defect_spin = ttk.Spinbox(defect_row, from_=0.0, to=100.0, increment=0.5,
-                   textvariable=self.black_defect_pct, width=7)
+                   textvariable=self.black_defect_pct, width=7, command=self._on_verdict_change)
         self.defect_spin.pack(side=tk.LEFT, padx=5)
+        # Also bind KeyRelease for typing
+        self.defect_spin.bind("<KeyRelease>", lambda e: self._on_verdict_change())
         ttk.Label(defect_row, text="%").pack(side=tk.LEFT)
         
         # Apply initial state - MOVED TO END OF METHOD TO FIX CRASH
@@ -3089,6 +1950,7 @@ class InspectorApp(tk.Tk):
         nav_btn_row.pack(fill=tk.X, padx=5, pady=2)
         ttk.Button(nav_btn_row, text="<< Prev", command=self._prev_image).pack(side=tk.LEFT, expand=True, fill=tk.X)
         ttk.Button(nav_btn_row, text="Next >>", command=self._next_image).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        
         
         self.nav_info = ttk.Label(nav_frame, text="No images loaded", foreground="#888888")
         self.nav_info.pack(pady=5)
@@ -3168,9 +2030,13 @@ class InspectorApp(tk.Tk):
         # Right panel - Image display
         display_frame = tk.Frame(main_frame, bg=self.BG_COLOR)
         display_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        #padding the original image to add black circle
+        padding_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
+        padding_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2, pady=2)
         
         # Original image
-        orig_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
+        orig_frame = tk.Frame(padding_frame, bg=self.BG_COLOR)
         orig_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
         ttk.Label(orig_frame, text="ORIGINAL").pack()
         self.orig_canvas = tk.Canvas(orig_frame, bg="#111111", highlightthickness=0)
@@ -3212,13 +2078,12 @@ class InspectorApp(tk.Tk):
         """Add tooltips to controls."""
         try:
             ToolTip(self.input_label, "Select folder containing images to inspect")
-            ToolTip(self.otsu_check, "Automatically calculate global threshold using Otsu's method")
+            
             ToolTip(self.adaptive_check, "Use local adaptive thresholding (better for uneven lighting)")
             ToolTip(self.block_scale, "Size of the local neighborhood for adaptive thresholding")
             ToolTip(self.c_scale, "Constant subtracted from the mean (Adaptive C)")
             ToolTip(self.sigma_scale, "Gaussian blur strength (Sigma) to reduce noise before thresholding")
             ToolTip(self.thresh_scale, "Manual global threshold value (0.0 - 1.0)")
-            ToolTip(self.noise_scale, "Morphological Open/Close operations to remove small noise and fill gaps")
             ToolTip(self.preset_combo, "Quickly select parameter presets for different defect types")
             ToolTip(self.defect_spin, "Threshold percentage of black pixels to consider an image defective")
         except Exception as e:
@@ -3403,27 +2268,22 @@ class InspectorApp(tk.Tk):
             sigma = 0.5 + (noise_var - 50) / 450 * 4.5
         return round(sigma, 2)
     
-    def _make_binary(self, rgb, alpha, sigma=1.2, thresh=0.65, use_otsu=False, 
-                      use_adaptive=False, block_size=11, c_value=2, noise_level=0,
+    def _make_binary(self, rgb, alpha, sigma=1.2, thresh=0.65, 
+                      use_adaptive=False, block_size=11, c_value=2,
                       use_hsv=False):
         """RGB -> Gray -> Filter (Gaussian/Bilateral/Median) -> Threshold -> BW."""
         
         # 0. HSV Masking (Gold Focus)
-        # If enabled, we create a mask of "valid" areas (Gold) and "invalid" (Green Background)
-        # We will use this to zero out the background AFTER thresholding.
         gold_mask = None
         if use_hsv:
-            # We need to call generic helper or reimplement
-            # Since _get_hsv_mask is instance method, we can't call it if this is static
-            # But this is an instance method, so we can!
-            # BUT: _make_binary is called by _quick_process/batch which might NOT be on 'self' context cleanly
-            # Wait, it IS an instance method.
             gold_mask = self._get_hsv_mask(rgb)
+        
+        
 
         # 1. Grayscale
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         
-        # 2. CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        # 2. CLAHE
         if self.use_clahe.get():
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             gray = clahe.apply(gray)
@@ -3441,13 +2301,33 @@ class InspectorApp(tk.Tk):
         # 4. Smoothing / Filtering
         f_method = self.filter_method.get()
         if f_method == "Gaussian":
-            smooth_f = masked_gaussian_smooth(gray_f, mask01, float(sigma))
+            # Using internal helper
+            smooth_f = self._masked_gaussian_smooth(gray_f, mask01, float(sigma))
         elif f_method == "Bilateral":
-            smooth_f = masked_bilateral_smooth(gray_f, mask01, float(sigma))
+            # Assuming bilateral helper exists or falling back to gaussian if not found?
+            # Sticking to previous pattern but correcting access if it was instance method
+            # If masked_bilateral_smooth isn't found, this might fail. 
+            # I will use self._masked_gaussian_smooth as safe fallback if I can't find bilateral
+            # But let's try to assume it was imported?
+            # Actually, to be safe, I'll stick to what was there but check for self.
+            try:
+                smooth_f = masked_bilateral_smooth(gray_f, mask01, float(sigma))
+            except NameError:
+                smooth_f = self._masked_gaussian_smooth(gray_f, mask01, float(sigma))
         elif f_method == "Median":
             k = int(float(sigma) * 3)
             if k % 2 == 0: k += 1
-            smooth_f = masked_median_smooth(gray_f, mask01, kernel_size=k)
+            smooth_f = self._masked_gaussian_smooth(gray_f, mask01, float(sigma)) # Fallback to avoid missing median helper?
+            # Previous code used masked_median_smooth. 
+            # I'll try to use it cautiously.
+            try:
+                smooth_f = masked_median_smooth(gray_f, mask01, kernel_size=k)
+            except NameError:
+                 # Median filter using OpenCV directly
+                 smooth_u8_temp = np.clip(gray_f * 255, 0, 255).astype(np.uint8)
+                 smooth_u8_temp = cv2.medianBlur(smooth_u8_temp, k)
+                 smooth_f = smooth_u8_temp.astype(np.float32) / 255.0
+
         else: # None
             smooth_f = gray_f
 
@@ -3468,57 +2348,7 @@ class InspectorApp(tk.Tk):
             )
             bw[~mask_bool] = 0
             
-            # Apply Gold Mask logic:
-            # We want to FIND DEFECTS (white pixels in 'bw')
-            # But ONLY if they are inside the GOLD area (white pixels in 'gold_mask')
-            # Actually, defects are usually "dark" spots on gold.
-            # Local adaptive threshold: finds local variations.
-            # If we mask out the green background (make it black), adaptive threshold might find edges there.
-            # SO: We should mask the result.
-            
             auto_params = (sigma, f"adapt({block},{c_value})")
-            
-        elif use_otsu:
-            # For Otsu, we can use the helper or just standard CV2
-            # Re-using local Otsu logic for consistency with previous implementation
-            masked_pixels = smooth_u8[mask_bool] # Only look at non-transparent pixels
-            
-            if use_hsv and gold_mask is not None:
-                 # If focusing on gold, only calculate Otsu on the gold pixels!
-                 # This makes thresholding much more accurate for the pads.
-                 gold_pixels = smooth_u8[gold_mask > 0]
-                 if len(gold_pixels) > 0:
-                     masked_pixels = gold_pixels
-
-            if len(masked_pixels) == 0:
-                thresh_val = 128
-            else:
-                # Use TRIANGLE instead of OTSU
-                thresh_val, _ = cv2.threshold(masked_pixels, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_TRIANGLE)
-            
-            # INVERTED Threshold usually finds Dark defects on Light background
-            # If standard THRESH_BINARY: Source > Thresh = 255 (White).
-            # Gold is bright. Defect is Dark.
-            # So Gold > Thresh -> White. Defect < Thresh -> Black.
-            # We want Defect to be White in the final mask.
-            # So we use THRESH_BINARY_INV.
-            # Let's check current logic: `cv2.threshold(..., cv2.THRESH_BINARY)`
-            # This makes bright things white.
-            # The user wants to detect "black marks".
-            # So we want the INVERSE of the bright stuff?
-            # Existing code seems to produce BW image where *something* is white.
-            # Let's stick to the current convention: High=White.
-            # If we want to detect defects, we usually invert at the end or change this.
-            # Assuming existing logic is: White = Defect?
-            # Wait, valid mask logic isn't clear in original snippet.
-            # Let's use standard logic:
-            # If Thresholding finds the "Bright Gold", then "Dark Defect" is the hole in it.
-            # Then we invert.
-            
-            # For now, let's keep the existing flow but enforce the Mask at the end.
-            _, bw = cv2.threshold(smooth_u8, thresh_val, 255, cv2.THRESH_BINARY)
-            bw[~mask_bool] = 0
-            auto_params = (sigma, thresh_val / 255.0)
             
         else:
             # Manual
@@ -3527,43 +2357,12 @@ class InspectorApp(tk.Tk):
             bw[~mask_bool] = 0
 
         # [HSV INTEGRATION STEP]
-        # If enabled, we want to IGNORE everything outside the Gold Mask.
         if use_hsv and gold_mask is not None:
-            # Logic:
-            # The background is Green. The defects are Black spots on Gold.
-            # The Gold is bright.
-            # 'bw' currently has White for Bright things (Gold) and Black for Dark things (Defects + Background).
-            # If we purely AND with gold_mask...
-            # GoldMask = White (255) on Gold, Black (0) on Green.
-            # BW = White on Gold, Black on Defect, Black on Green.
-            # Result = White on Clean Gold, Black on Defect, Black on Green.
-            # This just isolates the gold pad. It doesn't "highlight" the defect.
-            #
-            # User wants: "Defect if black% > X".
-            # So they are measuring the amount of BLACK pixels.
-            # If we allow the Green Background to remain Black, the "Black%" will be huge (failure).
-            # We need the Green Background to be ignored (count as "White" or "Transparent" or "Not Defect").
-            # 
-            # Solution:
-            # We want to measure "Black Spots ON THE GOLD".
-            # We should forcibly set the Background (Non-Gold) pixels to WHITE (Safe) in the binary map.
-            # So that only the ACTUAL defects (dark spots on gold) remain Black.
-            
-            # 1. Invert Gold Mask: White=Background/Green, Black=Gold
             bg_mask = cv2.bitwise_not(gold_mask)
-            
-            # 2. Set Background pixels in 'bw' to WHITE (255)
-            # This ensures they are not counted as "Defects" (Black pixels).
             bw = cv2.bitwise_or(bw, bg_mask)
 
-        # 6. Morphological Stabilization
-        if noise_level > 0:
-            k_size = 3 
-            if noise_level >= 5: k_size = 5
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
-            bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
-            bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, kernel)
-        
+        # Removed Morphological Stabilization (noise_level)
+
         return gray_u8, smooth_u8, bw, mask_bool, auto_params
     
     def _compute_stats(self, bw_u8, mask_bool):
@@ -3581,29 +2380,11 @@ class InspectorApp(tk.Tk):
     # === EVENT HANDLERS ===
     
     def _on_threshold_mode_change(self):
-        """Handle threshold mode change (Otsu/Adaptive/Manual)."""
-        use_otsu = self.use_otsu.get()
+        """Handle threshold mode change (Adaptive/Manual)."""
         use_adaptive = self.use_adaptive.get()
         
-        # Mutual exclusivity - if one is checked, uncheck the other
-        if use_otsu and use_adaptive:
-            # Last checked wins
-            if hasattr(self, '_last_mode') and self._last_mode == 'otsu':
-                self.use_otsu.set(False)
-                use_otsu = False
-            else:
-                self.use_adaptive.set(False)
-                use_adaptive = False
-        
-        self._last_mode = 'adaptive' if use_adaptive else ('otsu' if use_otsu else 'manual')
-        
         # Update slider states
-        if use_otsu:
-            self.sigma_scale.configure(state="disabled")
-            self.thresh_scale.configure(state="disabled")
-            self.block_scale.configure(state="disabled")
-            self.c_scale.configure(state="disabled")
-        elif use_adaptive:
+        if use_adaptive:
             self.sigma_scale.configure(state="normal")
             self.thresh_scale.configure(state="disabled")
             self.block_scale.configure(state="normal")
@@ -3616,15 +2397,13 @@ class InspectorApp(tk.Tk):
         
         self._refresh_preview()
     
-    def _on_otsu_toggle(self):
-        """Legacy toggle - redirects to new handler."""
-        self._on_threshold_mode_change()
+
     
     def _select_input(self):
         """Select input folder."""
-        folder = filedialog.askdirectory(title="Select Input Folder")
+        folder = filedialog.askdirectory(title="Select Desired Input Folder")
         if not folder:
-            return
+            return messagebox.showwarning("No Folder Selected", "No folder selected.")
         
         self.input_folder.set(folder)
         self.files = self._list_images(folder)
@@ -3639,6 +2418,22 @@ class InspectorApp(tk.Tk):
         self.input_label.config(text=os.path.basename(folder), foreground=self.FG_COLOR)
         self.status_var.set(f"Loaded {len(self.files)} images from {os.path.basename(folder)}")
         self._load_current()
+
+    def _select_single_image(self):
+        """Select a single image file."""
+        f = filedialog.askopenfilename(
+            title="Select Single Image",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.tiff *.tif")]
+        )
+        if f:
+            self.files = [f]
+            self.input_folder.set(os.path.dirname(f))
+            self.input_label.config(text=f"FILE: {os.path.basename(f)}", foreground=self.FG_COLOR)
+            self.idx = 0
+            self.results = []
+            self.status_var.set(f"Loaded single file: {os.path.basename(f)}")
+            self._load_current()
+            messagebox.showinfo("Single Image", f"Loaded: {os.path.basename(f)}")
     
     def _select_output(self):
         """Select output folder."""
@@ -3684,6 +2479,8 @@ class InspectorApp(tk.Tk):
             self.thresh.set(settings["thresh"])
             self.adaptive_block_size.set(settings["block"])
             self.adaptive_c.set(settings["c"])
+            if "defect_pct" in settings:
+                self.black_defect_pct.set(settings["defect_pct"])
             
             # Update labels
             self.sigma_label.config(text=f"{settings['sigma']:.2f}")
@@ -3691,12 +2488,100 @@ class InspectorApp(tk.Tk):
             self.block_label.config(text=f"{int(settings['block'])}")
             self.c_label.config(text=f"{int(settings['c'])}")
             
-            # Force Adaptive Mode if not already
+            # Force Adaptive Mode when using a preset
             if not self.use_adaptive.get():
                 self.use_adaptive.set(True)
-                self.use_otsu.set(False)
-            
+                self._on_threshold_mode_change()
             self._refresh_preview()
+
+    def _classify_and_tune(self):
+        """Call Roboflow to classify image and auto-select preset."""
+        if self.current_image is None:
+            messagebox.showwarning("No Image", "Please load an image first.")
+            return
+
+        self.class_label.config(text="Analyzing...")
+        self.update_idletasks()
+        
+        try:
+            # 1. Save temp image for inference
+            # Using tempfile would be cleaner, but simple specific path is fine for this context
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                temp_path = tf.name
+            
+            # Convert RGB (internal) to BGR for saving
+            bgr = cv2.cvtColor(self.current_image, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(temp_path, bgr)
+            
+            # 2. Call Roboflow API
+            # result = self.client.infer(temp_path, model_id=self.model_id) # Generic infer
+            # The project snippet used get_model -> predict. 
+            # But the initialized client can also do it directly if configured right.
+            # Let's use the standard 'infer' call on the client we inited.
+            
+            res = self.client.infer(temp_path, model_id=self.model_id)
+            
+            # Clean up
+            os.remove(temp_path)
+            
+            # 3. Parse result
+            # Expected format: {'predictions': [{'class': 'Stain', 'confidence': 0.88, ...}], ...}
+            # Or if it's classification, it might be different. Let's assume standard classification response.
+            
+            if 'predictions' in res and len(res['predictions']) > 0:
+                # Classification usually returns top class or list
+                # If it's object detection... user said "Classification".
+                # Let's assume the user set up a Classification project.
+                # If it is returning a list of predictions (classes), take top one.
+                
+                # Handling generic structure flexibility
+                preds = res['predictions']
+                if isinstance(preds, list):
+                    top = preds[0]
+                elif isinstance(preds, dict):
+                    # Sometimes key is the class name? No, usually 'predictions' is list or dict with class keys
+                    # If it's a dict like {'Stain': 0.9, 'Scratch': 0.1}:
+                    top_class = max(preds, key=preds.get)
+                    top = {'class': top_class, 'confidence': preds[top_class]}
+                else:
+                    top = {'class': 'Unknown', 'confidence': 0.0}
+                    
+                # Extract class name
+                # Sometimes key is 'class', sometimes 'class_name', or just the string if list of strings
+                c_name = top.get('class', top.get('class_name', 'Unknown'))
+                conf = top.get('confidence', 0.0)
+                
+                self.classification_result = f"{c_name} ({conf:.2f})"
+                self.class_label.config(text=self.classification_result)
+                
+                # 4. Map to Preset
+                # Mapping: Stain -> Stains, Scratch -> Scratches, Pinhole -> Pinholes, Normal -> General
+                target_preset = "General"
+                lower_name = c_name.lower()
+                
+                if "stain" in lower_name:
+                    target_preset = "Stains"
+                elif "scratch" in lower_name:
+                    target_preset = "Scratches"
+                elif "pinhole" in lower_name:
+                    target_preset = "Pinholes"
+                elif 'irregular' in lower_name:
+                    target_preset = "Irregularities"
+                
+                # Apply
+                if target_preset in self.DEFECT_PRESETS:
+                    self.preset_var.set(target_preset)
+                    self._on_preset_change()
+                    messagebox.showinfo("Tuned", f"Detected: {c_name}\nApplied preset: {target_preset}")
+                else:
+                    messagebox.showwarning("Unknown Class", f"Class '{c_name}' not mapped to any known preset.")
+            else:
+                self.class_label.config(text="No prediction")
+                
+        except Exception as e:
+            self.class_label.config(text="Error")
+            messagebox.showerror("Inference Error", str(e))
 
     def _on_manual_change(self, *args):
         """Handle manual slider adjustment -> switch to Custom preset."""
@@ -3709,7 +2594,6 @@ class InspectorApp(tk.Tk):
         if self.current_image is None:
             return
         
-        use_otsu = self.use_otsu.get()
         use_adaptive = self.use_adaptive.get()
         use_hsv = self.use_hsv.get()
         
@@ -3718,26 +2602,19 @@ class InspectorApp(tk.Tk):
             self.current_alpha,
             sigma=float(self.sigma.get()),
             thresh=float(self.thresh.get()),
-            use_otsu=use_otsu,
             use_adaptive=use_adaptive,
             block_size=int(self.adaptive_block_size.get()),
             c_value=int(self.adaptive_c.get()),
-            noise_level=int(self.noise_level.get()),
             use_hsv=use_hsv
         )
         _, _, bw_u8, mask_bool, auto_params = result
         
+        self.current_bw = bw_u8
+        self.current_mask_bool = mask_bool # Cache it
+        
         # Update labels based on mode
-        if use_otsu and auto_params:
-            auto_sigma, auto_thresh = auto_params
-            self.sigma.set(auto_sigma)
-            if isinstance(auto_thresh, (float, int)):
-                self.thresh.set(auto_thresh)
-                self.thresh_label.configure(text=f"{auto_thresh:.2f}")
-            self.sigma_label.configure(text=f"{auto_sigma:.2f}")
-        else:
-            self.sigma_label.configure(text=f"{self.sigma.get():.2f}")
-            self.thresh_label.configure(text=f"{self.thresh.get():.2f}")
+        self.sigma_label.configure(text=f"{self.sigma.get():.2f}")
+        self.thresh_label.configure(text=f"{self.thresh.get():.2f}")
         
         block_val = int(self.adaptive_block_size.get())
         if block_val % 2 == 0: block_val += 1
@@ -3752,9 +2629,22 @@ class InspectorApp(tk.Tk):
         # Compute stats
         white_px, black_px, area_px, white_pct, black_pct = self._compute_stats(bw_u8, mask_bool)
         
+        # Find the defect type with the most total area
+        dominant_defect_type = ""
+        if self.auto_defects:
+            area_by_type = {}
+            for d in self.auto_defects:
+                dtype = d.get('type', 'Unknown')
+                area_by_type[dtype] = area_by_type.get(dtype, 0) + d.get('area', 0)
+            if area_by_type:
+                dominant_defect_type = max(area_by_type, key=area_by_type.get)
+        
         if black_pct > float(self.black_defect_pct.get()):
             status = "DEFECT"
-            self.result_label.config(text=f"⚠ DEFECT ({len(self.auto_defects)})", fg="#FF4444")
+            if dominant_defect_type:
+                self.result_label.config(text=f"⚠ {dominant_defect_type} ({len(self.auto_defects)})", fg="#FF4444")
+            else:
+                self.result_label.config(text=f"⚠ DEFECT ({len(self.auto_defects)})", fg="#FF4444")
         else:
             status = "OK"
             self.result_label.config(text=f"✓ OK ({len(self.auto_defects)})", fg="#00FF41")
@@ -3765,7 +2655,7 @@ class InspectorApp(tk.Tk):
             self.nav_info.config(text=f"{self.idx+1}/{len(self.files)}: {base}")
             
         # Stats Text
-        mode_str = "Adaptive" if use_adaptive else ("Otsu" if use_otsu else "Manual")
+        mode_str = "Adaptive" if use_adaptive else "Manual"
         
         self.stats_text.delete(1.0, tk.END)
         self.stats_text.insert(tk.END, f"Status: {status}\n")
@@ -3806,6 +2696,42 @@ class InspectorApp(tk.Tk):
                  cv2.putText(vis_img, m['type'], (x, y-2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
                  
         self._display_on_canvas(vis_img, self.bw_canvas)
+
+    def _on_verdict_change(self, *args):
+        """Handle change in defect % threshold efficiently."""
+        if self.current_bw is None or self.current_mask_bool is None: 
+            return
+            
+        try:
+            # Re-read threshold
+            black_th = float(self.black_defect_pct.get())
+            
+            # Re-compute verdict using cached binary and mask
+            # We don't need to re-compute stats if we stored them, but comp stats is fast.
+            white_px, black_px, area_px, white_pct, black_pct = self._compute_stats(self.current_bw, self.current_mask_bool)
+            
+            if black_pct > black_th:
+                status = "DEFECT"
+                self.result_label.config(text=f"⚠ DEFECT ({len(self.auto_defects)})", fg="#FF4444")
+            else:
+                status = "OK"
+                self.result_label.config(text=f"✓ OK ({len(self.auto_defects)})", fg="#00FF41")
+            
+            # Update stats text status only (quick hack or full rewrite)
+            # Full consistency requires updating stats text.
+            # Using current values from UI/Logic:
+            use_adaptive = self.use_adaptive.get()
+            mode_str = "Adaptive" if use_adaptive else "Manual"
+            
+            self.stats_text.delete(1.0, tk.END)
+            self.stats_text.insert(tk.END, f"Status: {status}\n")
+            self.stats_text.insert(tk.END, f"Mode: {mode_str}\n")
+            self.stats_text.insert(tk.END, f"Black: {black_pct:.2f}% ({black_px} px)\n")
+            self.stats_text.insert(tk.END, f"White: {white_pct:.2f}% ({white_px} px)\n")
+            self.stats_text.insert(tk.END, f"Defects: {len(self.auto_defects)}\n")
+            
+        except (ValueError, tk.TclError):
+            pass # Handle invalid number input gracefully (e.g., empty string during typing)
 
     def _remove_selected_label(self):
         """Remove the selected label from the list."""
@@ -3892,7 +2818,6 @@ class InspectorApp(tk.Tk):
         os.makedirs(out_ok, exist_ok=True)
         os.makedirs(out_ng, exist_ok=True)
         
-        use_otsu = self.use_otsu.get()
         use_adaptive = self.use_adaptive.get()
         sigma = float(self.sigma.get())
         thresh = float(self.thresh.get())
@@ -3910,7 +2835,7 @@ class InspectorApp(tk.Tk):
             try:
                 rgb, alpha = self._read_image_with_alpha(path)
                 result = self._make_binary(rgb, alpha, sigma=sigma, thresh=thresh, 
-                                          use_otsu=use_otsu, use_adaptive=use_adaptive,
+                                          use_adaptive=use_adaptive,
                                           block_size=block_size, c_value=c_value,
                                           use_hsv=self.use_hsv.get())
                 _, _, bw, mask_bool, _ = result
@@ -3965,7 +2890,6 @@ class InspectorApp(tk.Tk):
     
     def _quick_process(self):
         """Quick process all images without saving (for overview)."""
-        use_otsu = self.use_otsu.get()
         use_adaptive = self.use_adaptive.get()
         sigma = float(self.sigma.get())
         thresh = float(self.thresh.get())
@@ -3978,7 +2902,7 @@ class InspectorApp(tk.Tk):
             try:
                 rgb, alpha = self._read_image_with_alpha(path)
                 result = self._make_binary(rgb, alpha, sigma=sigma, thresh=thresh, 
-                                          use_otsu=use_otsu, use_adaptive=use_adaptive,
+                                          use_adaptive=use_adaptive,
                                           block_size=block_size, c_value=c_value,
                                           use_hsv=self.use_hsv.get())
                 _, _, bw, mask_bool, _ = result
@@ -4136,10 +3060,22 @@ class OverviewWindow(tk.Toplevel):
         
         # Mouse wheel scrolling
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            try:
+                if canvas.winfo_exists():
+                    canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            except tk.TclError:
+                pass
+        
+        # Bind only to this canvas/window focus instead of global bind_all which causes issues
+        # But for scroll, bind_all is common. Let's just safeguard the callback.
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
         
-        self._thumb_refs = []
+        # Unbind on destroy to prevent calling destroyed widget
+        def _unbind(event):
+            canvas.unbind_all("<MouseWheel>")
+        canvas.bind("<Destroy>", _unbind)
+        
+        # self._thumb_refs = [] # Removed to avoid overwriting previous tab's refs
         cols = 5
         thumb_max = (160, 160)
         
@@ -4153,7 +3089,7 @@ class OverviewWindow(tk.Toplevel):
             # Create thumbnail
             thumb = self._create_thumbnail(res.get("rgb"), thumb_max)
             if thumb:
-                self._thumb_refs.append(thumb)
+                # self._thumb_refs.append(thumb)
                 
                 name = os.path.basename(res.get("path", "?"))
                 black_pct = res.get("black_pct", 0)
@@ -4161,6 +3097,8 @@ class OverviewWindow(tk.Toplevel):
                 lbl = ttk.Label(tile, image=thumb,
                               text=f"{name}\nblack={black_pct:.1f}%",
                               compound=tk.TOP, justify=tk.CENTER)
+                # Keep reference to avoid garbage collection
+                lbl.image = thumb
                 lbl.pack()
                 
                 # Detail button
@@ -4394,7 +3332,12 @@ class QRCropperTab(tk.Frame):
 
 
 class GoldPadExtractorTab(tk.Frame):
-    """Gold Pad Extraction Tab (for notebook embedding)."""
+    """Gold Pad Extraction Tab (for notebook embedding).
+    
+    Uses MATLAB-style crop_golden_circles algorithm for robust detection
+    of golden circular pads with HSV thresholding, morphological operations,
+    and eccentricity-based filtering.
+    """
     
     BG_COLOR = "#000000"
     FG_COLOR = "#FFD700"
@@ -4406,31 +3349,42 @@ class GoldPadExtractorTab(tk.Frame):
         self.app = app
         
         self.current_image = None
-        self.detected_pads = []
-        self.extracted_pads = []
+        self.current_image_path = None
+        self.detected_regions = []  # CircleRegion objects
+        self.extracted_pads = []    # (crop_img, region) tuples
         
-        # HSV range for gold
-        self.hue_low = tk.IntVar(value=15)
-        self.hue_high = tk.IntVar(value=35)
-        self.sat_low = tk.IntVar(value=50)
-        self.sat_high = tk.IntVar(value=255)
-        self.val_low = tk.IntVar(value=100)
-        self.val_high = tk.IntVar(value=255)
+        # MATLAB-style HSV thresholds (0-1 scale displayed, converted internally)
+        # Default: H 0.06-0.40, S > 0.15, V > 0.55
+        self.h_min = tk.DoubleVar(value=0.06)
+        self.h_max = tk.DoubleVar(value=0.40)
+        self.s_min = tk.DoubleVar(value=0.15)
+        self.v_min = tk.DoubleVar(value=0.55)
         
-        self.min_radius = tk.IntVar(value=20)
-        self.max_radius = tk.IntVar(value=100)
+        # Region filtering parameters (MATLAB-style)
+        self.max_eccentricity = tk.DoubleVar(value=0.75)
+        self.min_equiv_diameter = tk.DoubleVar(value=20)
+        self.min_area = tk.IntVar(value=500)
+        
+        # Morphological parameters
+        self.close_disk_size = tk.IntVar(value=6)
+        self.open_disk_size = tk.IntVar(value=3)
+        self.min_area_open = tk.IntVar(value=400)
+        
+        # Circular crop option
+        self.circular_crop = tk.BooleanVar(value=True)
+        self.padding = tk.IntVar(value=0)
         
         self._build_ui()
     
     def _build_ui(self):
-        """Build the Gold Pad Extractor UI."""
+        """Build the Gold Pad Extractor UI with MATLAB parameters."""
         main_frame = tk.Frame(self, bg=self.BG_COLOR)
         main_frame.pack(fill=tk.BOTH, expand=True)
         
         # Gold title bar
         title_bar = tk.Frame(main_frame, bg="#332800")
         title_bar.pack(fill=tk.X)
-        tk.Label(title_bar, text="🔶 GOLD PAD EXTRACTOR", 
+        tk.Label(title_bar, text="🔶 GOLD PAD EXTRACTOR (MATLAB Algorithm)", 
                 font=(self.FONT_FACE, 12, 'bold'),
                 bg="#332800", fg=self.ACCENT_COLOR).pack(side=tk.LEFT, padx=10, pady=5)
         
@@ -4443,37 +3397,66 @@ class GoldPadExtractorTab(tk.Frame):
                  font=(self.FONT_FACE, 10, 'bold'),
                  bg="#443300", fg=self.FG_COLOR,
                  command=self._load_image).pack(side=tk.LEFT, padx=2, pady=5)
-        tk.Button(controls_frame, text="👁 Preview",
+        tk.Button(controls_frame, text="👁 Preview Mask",
                  font=(self.FONT_FACE, 10, 'bold'),
                  bg="#443300", fg=self.FG_COLOR,
                  command=self._preview_detection).pack(side=tk.LEFT, padx=2, pady=5)
-        tk.Button(controls_frame, text="✂ Extract",
+        tk.Button(controls_frame, text="✂ Detect & Extract",
                  font=(self.FONT_FACE, 10, 'bold'),
                  bg="#443300", fg=self.FG_COLOR,
                  command=self._extract_pads).pack(side=tk.LEFT, padx=2, pady=5)
-        tk.Button(controls_frame, text="💾 Save",
+        tk.Button(controls_frame, text="💾 Save Pads",
                  font=(self.FONT_FACE, 10, 'bold'),
                  bg="#443300", fg=self.FG_COLOR,
                  command=self._save_pads).pack(side=tk.LEFT, padx=2, pady=5)
+        
+        # Circular crop checkbox
+        ttk.Checkbutton(controls_frame, text="Circular (Alpha)",
+                       variable=self.circular_crop).pack(side=tk.LEFT, padx=5)
         
         self.status_label = tk.Label(controls_frame, text="No image loaded",
                                     font=(self.FONT_FACE, 9),
                                     bg=self.BG_COLOR, fg="#888888")
         self.status_label.pack(side=tk.LEFT, padx=10)
         
-        # HSV sliders in a compact row
+        # HSV sliders row (MATLAB 0-1 scale)
         hsv_frame = tk.Frame(main_frame, bg=self.BG_COLOR)
         hsv_frame.pack(fill=tk.X, pady=2)
         
-        tk.Label(hsv_frame, text="Hue:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
-        ttk.Scale(hsv_frame, from_=0, to=50, variable=self.hue_low, orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
-        ttk.Scale(hsv_frame, from_=0, to=50, variable=self.hue_high, orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        tk.Label(hsv_frame, text="H min:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        ttk.Scale(hsv_frame, from_=0.0, to=0.5, variable=self.h_min, 
+                 orient=tk.HORIZONTAL, length=50).pack(side=tk.LEFT)
+        tk.Label(hsv_frame, text="H max:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        ttk.Scale(hsv_frame, from_=0.0, to=0.5, variable=self.h_max, 
+                 orient=tk.HORIZONTAL, length=50).pack(side=tk.LEFT)
         
-        tk.Label(hsv_frame, text="  Sat:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
-        ttk.Scale(hsv_frame, from_=0, to=255, variable=self.sat_low, orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        tk.Label(hsv_frame, text="S min:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        ttk.Scale(hsv_frame, from_=0.0, to=1.0, variable=self.s_min, 
+                 orient=tk.HORIZONTAL, length=50).pack(side=tk.LEFT)
         
-        tk.Label(hsv_frame, text="  Val:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
-        ttk.Scale(hsv_frame, from_=0, to=255, variable=self.val_low, orient=tk.HORIZONTAL, length=60).pack(side=tk.LEFT)
+        tk.Label(hsv_frame, text="V min:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        ttk.Scale(hsv_frame, from_=0.0, to=1.0, variable=self.v_min, 
+                 orient=tk.HORIZONTAL, length=50).pack(side=tk.LEFT)
+        
+        # Region filter sliders row
+        filter_frame = tk.Frame(main_frame, bg=self.BG_COLOR)
+        filter_frame.pack(fill=tk.X, pady=2)
+        
+        tk.Label(filter_frame, text="Max Ecc:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        ttk.Scale(filter_frame, from_=0.3, to=1.0, variable=self.max_eccentricity, 
+                 orient=tk.HORIZONTAL, length=50).pack(side=tk.LEFT)
+        
+        tk.Label(filter_frame, text="Min Diam:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        ttk.Scale(filter_frame, from_=5, to=100, variable=self.min_equiv_diameter, 
+                 orient=tk.HORIZONTAL, length=50).pack(side=tk.LEFT)
+        
+        tk.Label(filter_frame, text="Min Area:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        ttk.Scale(filter_frame, from_=100, to=2000, variable=self.min_area, 
+                 orient=tk.HORIZONTAL, length=50).pack(side=tk.LEFT)
+        
+        tk.Label(filter_frame, text="Padding:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT)
+        ttk.Scale(filter_frame, from_=0, to=20, variable=self.padding, 
+                 orient=tk.HORIZONTAL, length=50).pack(side=tk.LEFT)
         
         # Image display
         self.image_label = tk.Label(main_frame, bg="#111111")
@@ -4489,57 +3472,215 @@ class GoldPadExtractorTab(tk.Frame):
             try:
                 from .io import read_image
                 self.current_image = read_image(path)
+                self.current_image_path = path
+                self.detected_regions = []
+                self.extracted_pads = []
                 self.status_label.config(text=os.path.basename(path)[:25])
                 self._display_image(self.current_image)
             except Exception as e:
                 messagebox.showerror("Error", str(e))
     
-    def _get_gold_mask(self, image):
-        """Create HSV mask for gold regions."""
+    def _detect_golden_regions(self, image):
+        """Detect golden regions using MATLAB algorithm.
+        
+        Uses HSV thresholding with morphological operations (close, open, 
+        area filter, fill holes) and returns filtered circular regions.
+        """
+        if len(image.shape) < 3 or image.shape[2] < 3:
+            raise ValueError("Input image must be RGB/BGR.")
+        
+        # Convert BGR to HSV (OpenCV uses 0-180 for H, 0-255 for S,V)
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        lower = np.array([self.hue_low.get(), self.sat_low.get(), self.val_low.get()])
-        upper = np.array([self.hue_high.get(), self.sat_high.get(), self.val_high.get()])
-        mask = cv2.inRange(hsv, lower, upper)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        return mask
+        
+        # Normalize to 0-1 scale (MATLAB convention)
+        H = hsv[:, :, 0] / 180.0  # OpenCV H is 0-180
+        S = hsv[:, :, 1] / 255.0
+        V = hsv[:, :, 2] / 255.0
+        
+        # Apply HSV thresholds (MATLAB: H > h_min & H < h_max) & (S > s_min) & (V > v_min)
+        h_min = self.h_min.get()
+        h_max = self.h_max.get()
+        s_min = self.s_min.get()
+        v_min = self.v_min.get()
+        
+        mask = ((H > h_min) & (H < h_max) & (S > s_min) & (V > v_min)).astype(np.uint8) * 255
+        
+        # Morphological operations (MATLAB: imclose, imopen, bwareaopen, imfill)
+        close_size = self.close_disk_size.get()
+        open_size = self.open_disk_size.get()
+        min_area_op = self.min_area_open.get()
+        
+        # imclose - closes small holes
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_size*2+1, close_size*2+1))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+        
+        # imopen - removes small noise
+        open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_size*2+1, open_size*2+1))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel)
+        
+        # bwareaopen - remove small components
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        mask_filtered = np.zeros_like(mask)
+        for i in range(1, num_labels):  # Skip background (0)
+            if stats[i, cv2.CC_STAT_AREA] >= min_area_op:
+                mask_filtered[labels == i] = 255
+        
+        # imfill holes
+        mask_filled = mask_filtered.copy()
+        h, w = mask_filtered.shape
+        flood_mask = np.zeros((h + 2, w + 2), np.uint8)
+        cv2.floodFill(mask_filled, flood_mask, (0, 0), 255)
+        mask_filled_inv = cv2.bitwise_not(mask_filled)
+        mask_final = mask_filtered | mask_filled_inv
+        
+        return mask_final
+    
+    def _get_region_properties(self, mask):
+        """Extract region properties similar to MATLAB regionprops."""
+        regions = []
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 1:
+                continue
+                
+            # Calculate centroid using moments
+            M = cv2.moments(cnt)
+            if M["m00"] == 0:
+                continue
+            cx = M["m10"] / M["m00"]
+            cy = M["m01"] / M["m00"]
+            
+            # Equivalent diameter: diameter of a circle with same area
+            equiv_diameter = np.sqrt(4 * area / np.pi)
+            
+            # Calculate eccentricity from ellipse fit
+            if len(cnt) >= 5:
+                ellipse = cv2.fitEllipse(cnt)
+                (_, _), (major_axis, minor_axis), _ = ellipse
+                if major_axis > 0:
+                    a = max(major_axis, minor_axis)
+                    b = min(major_axis, minor_axis)
+                    eccentricity = np.sqrt(1 - (b / a) ** 2)
+                else:
+                    eccentricity = 0
+            else:
+                eccentricity = 0
+            
+            # Bounding box
+            x, y, w, h = cv2.boundingRect(cnt)
+            
+            regions.append({
+                'centroid': (cx, cy),
+                'equiv_diameter': equiv_diameter,
+                'area': area,
+                'eccentricity': eccentricity,
+                'bbox': (x, y, w, h)
+            })
+        
+        return regions
+    
+    def _filter_circular_regions(self, regions):
+        """Filter regions to keep only near-circular shapes (MATLAB algorithm)."""
+        max_ecc = self.max_eccentricity.get()
+        min_diam = self.min_equiv_diameter.get()
+        min_area = self.min_area.get()
+        
+        return [
+            r for r in regions
+            if r['eccentricity'] < max_ecc
+            and r['equiv_diameter'] > min_diam
+            and r['area'] > min_area
+        ]
     
     def _preview_detection(self):
-        """Preview the gold mask and detected circles."""
+        """Preview the gold mask using MATLAB detection."""
         if self.current_image is None:
             messagebox.showwarning("No Image", "Please load an image first.")
             return
         
-        mask = self._get_gold_mask(self.current_image)
-        preview = self.current_image.copy()
-        preview[mask > 0] = [0, 215, 255]  # Highlight gold areas
-        self._display_image(preview)
-        self.status_label.config(text=f"Gold area: {np.count_nonzero(mask)} px")
+        try:
+            mask = self._detect_golden_regions(self.current_image)
+            preview = self.current_image.copy()
+            preview[mask > 0] = [0, 215, 255]  # Highlight gold areas in orange
+            
+            # Get region count
+            regions = self._get_region_properties(mask)
+            filtered = self._filter_circular_regions(regions)
+            
+            self._display_image(preview)
+            self.status_label.config(
+                text=f"Mask area: {np.count_nonzero(mask)} px | "
+                     f"Regions: {len(regions)} → {len(filtered)} filtered"
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"Detection failed: {e}")
     
     def _extract_pads(self):
-        """Extract individual gold pad images."""
+        """Extract individual gold pad images using MATLAB algorithm."""
         if self.current_image is None:
+            messagebox.showwarning("No Image", "Please load an image first.")
             return
         
-        mask = self._get_gold_mask(self.current_image)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        self.extracted_pads = []
-        preview = self.current_image.copy()
-        
-        for i, cnt in enumerate(contours):
-            area = cv2.contourArea(cnt)
-            if area < 500:
-                continue
+        try:
+            # Detect using MATLAB algorithm
+            mask = self._detect_golden_regions(self.current_image)
+            regions = self._get_region_properties(mask)
+            self.detected_regions = self._filter_circular_regions(regions)
             
-            x, y, w, h = cv2.boundingRect(cnt)
-            pad_crop = self.current_image[y:y+h, x:x+w].copy()
-            self.extracted_pads.append(pad_crop)
-            cv2.rectangle(preview, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            cv2.putText(preview, str(i+1), (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        
-        self._display_image(preview)
-        self.status_label.config(text=f"Extracted {len(self.extracted_pads)} pads")
+            if not self.detected_regions:
+                messagebox.showinfo("No Pads", 
+                    "No golden circular pads detected. Try adjusting HSV thresholds or filters.")
+                return
+            
+            self.extracted_pads = []
+            preview = self.current_image.copy()
+            h_img, w_img = self.current_image.shape[:2]
+            pad_val = self.padding.get()
+            
+            for k, region in enumerate(self.detected_regions):
+                cx, cy = region['centroid']
+                r = region['equiv_diameter'] / 2
+                
+                # Calculate crop boundaries
+                x1 = int(max(0, np.floor(cx - r - pad_val)))
+                y1 = int(max(0, np.floor(cy - r - pad_val)))
+                x2 = int(min(w_img, np.ceil(cx + r + pad_val)))
+                y2 = int(min(h_img, np.ceil(cy + r + pad_val)))
+                
+                # Crop the region
+                crop_img = self.current_image[y1:y2, x1:x2].copy()
+                crop_h, crop_w = crop_img.shape[:2]
+                
+                if self.circular_crop.get():
+                    # Calculate local center position within the crop
+                    local_cx = cx - x1
+                    local_cy = cy - y1
+                    
+                    # Create circular alpha mask
+                    Y, X = np.ogrid[:crop_h, :crop_w]
+                    dist_sq = (X - local_cx) ** 2 + (Y - local_cy) ** 2
+                    alpha = (dist_sq <= r ** 2).astype(np.uint8) * 255
+                    
+                    # Add alpha channel to image
+                    b, g, r_ch = cv2.split(crop_img)
+                    crop_with_alpha = cv2.merge([b, g, r_ch, alpha])
+                    self.extracted_pads.append((crop_with_alpha, region))
+                else:
+                    self.extracted_pads.append((crop_img, region))
+                
+                # Draw on preview
+                cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.circle(preview, (int(cx), int(cy)), int(r), (0, 255, 255), 1)
+                cv2.putText(preview, str(k+1), (x1, y1-5), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+            self._display_image(preview)
+            self.status_label.config(text=f"Extracted {len(self.extracted_pads)} circular pads")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Extraction failed: {e}")
     
     def _save_pads(self):
         """Save extracted gold pads."""
@@ -4551,10 +3692,22 @@ class GoldPadExtractorTab(tk.Frame):
         
         folder = filedialog.askdirectory(title="Select Output Folder")
         if folder:
-            for i, pad in enumerate(self.extracted_pads):
-                path = os.path.join(folder, f"gold_pad_{i+1:03d}.png")
+            # Get base name from image path
+            if self.current_image_path:
+                base_name = os.path.splitext(os.path.basename(self.current_image_path))[0]
+            else:
+                base_name = "Output"
+            
+            for i, (pad, region) in enumerate(self.extracted_pads):
+                if self.circular_crop.get():
+                    filename = f"{base_name}_Circle_alpha_{i+1:03d}.png"
+                else:
+                    filename = f"{base_name}_Circle_rect_{i+1:03d}.png"
+                path = os.path.join(folder, filename)
                 cv2.imwrite(path, pad)
-            messagebox.showinfo("Saved", f"Saved {len(self.extracted_pads)} gold pads to {folder}")
+            
+            messagebox.showinfo("Saved", 
+                f"Saved {len(self.extracted_pads)} gold pads to {folder}")
     
     def _display_image(self, cv2_image, size=(500, 400)):
         """Display image in the label."""
@@ -4565,7 +3718,11 @@ class GoldPadExtractorTab(tk.Frame):
         new_w, new_h = int(w * ratio), int(h * ratio)
         if new_w == 0 or new_h == 0:
             return
-        img_resized = cv2.resize(cv2_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        # Handle 4-channel images (BGRA)
+        if len(cv2_image.shape) == 3 and cv2_image.shape[2] == 4:
+            img_resized = cv2.resize(cv2_image[:, :, :3], (new_w, new_h), interpolation=cv2.INTER_AREA)
+        else:
+            img_resized = cv2.resize(cv2_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
         if len(img_resized.shape) == 2:
             img_resized = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2BGR)
         img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
@@ -4745,7 +3902,7 @@ class RedPadExtractorTab(tk.Frame):
 
 
 # ==============================================================================
-# HELPER FUNCTIONS FOR DEFECT DETECTION
+# HELPER FUNCTIONS FOR DEFECT DETECTION(Keepable)
 # ==============================================================================
 
 def masked_gaussian_smooth(gray01, mask01, sigma):
@@ -4845,13 +4002,19 @@ def analyze_defects(bw_u8, mask_bool, min_area=5):
         hull = cv2.convexHull(contour)
         hull_area = cv2.contourArea(hull)
         solidity = area / (hull_area + 1e-8)
-        
+        #if defect is too small, it is not a defect
         # Classification Logic
-        if area < 30:
+        if area < min_area:
+            continue
+        #els defect is too round that it is not a stain so it is not a defect
+        elif circularity > 0.98 :
+            continue
+        
+        elif 30 > area > 15:
             dtype = "Pinhole"
         elif aspect > 3.0 or circularity < 0.3:
             dtype = "Scratch"
-        elif circularity > 0.5 and solidity > 0.8:
+        elif circularity > 0.4 and solidity > 0.8 and area>15:
             dtype = "Stain"
         else:
             dtype = "Irregular"
@@ -5087,18 +4250,13 @@ class DefectLabelerWindow(tk.Toplevel):
 class TextureAnalysisWindow(tk.Toplevel):
     """FFT-based Texture Analysis Tool for filtering out periodic patterns."""
     
-    BG_COLOR = "#0A0A1A"
-    FG_COLOR = "#00FFFF"
-    ACCENT_COLOR = "#FF00FF"
-    FONT_FACE = "Consolas"
-    
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
         
         self.title("Texture Analysis (FFT)")
         self.geometry("1400x800")
-        self.configure(bg=self.BG_COLOR)
+        self.configure(bg=DARK_THEME.BG_MAIN)
         
         # State
         self.current_image = None
@@ -5112,79 +4270,79 @@ class TextureAnalysisWindow(tk.Toplevel):
         """Build the UI layout."""
         # Title
         title = tk.Label(self, text="[ TEXTURE ANALYSIS (FFT) ]",
-                        font=(self.FONT_FACE, 14, 'bold'),
-                        bg=self.BG_COLOR, fg=self.ACCENT_COLOR)
+                        font=DARK_THEME.FONT_HEADER,
+                        bg=DARK_THEME.BG_MAIN, fg=DARK_THEME.ACCENT_INFO)
         title.pack(pady=10)
         
         # Controls Frame
-        ctrl_frame = tk.Frame(self, bg=self.BG_COLOR)
+        ctrl_frame = tk.Frame(self, bg=DARK_THEME.BG_MAIN)
         ctrl_frame.pack(fill=tk.X, padx=10, pady=5)
         
-        tk.Button(ctrl_frame, text="📁 Load Image", bg="#333", fg=self.FG_COLOR,
-                 font=(self.FONT_FACE, 10, 'bold'),
+        tk.Button(ctrl_frame, text="📁 Load Image", bg=DARK_THEME.BG_PANEL, fg=DARK_THEME.FG_PRIMARY,
+                 font=DARK_THEME.FONT_BOLD,
                  command=self._load_image).pack(side=tk.LEFT, padx=5)
         
         # Filter Type
-        tk.Label(ctrl_frame, text="Filter:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(20, 5))
+        tk.Label(ctrl_frame, text="Filter:", bg=DARK_THEME.BG_MAIN, fg=DARK_THEME.FG_PRIMARY).pack(side=tk.LEFT, padx=(20, 5))
         self.filter_type = tk.StringVar(value="Low Pass")
         ttk.Combobox(ctrl_frame, textvariable=self.filter_type,
                     values=["Low Pass", "High Pass", "Band Pass"],
                     state="readonly", width=12).pack(side=tk.LEFT, padx=5)
         
         # Radius Slider
-        tk.Label(ctrl_frame, text="Radius:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(20, 5))
+        tk.Label(ctrl_frame, text="Radius:", bg=DARK_THEME.BG_MAIN, fg=DARK_THEME.FG_PRIMARY).pack(side=tk.LEFT, padx=(20, 5))
         self.radius = tk.IntVar(value=30)
         self.radius_scale = ttk.Scale(ctrl_frame, from_=1, to=200, variable=self.radius,
                                       orient=tk.HORIZONTAL, length=150,
                                       command=self._on_radius_change)
         self.radius_scale.pack(side=tk.LEFT, padx=5)
-        self.radius_label = tk.Label(ctrl_frame, text="30", bg=self.BG_COLOR, fg=self.FG_COLOR, width=4)
+        self.radius_label = tk.Label(ctrl_frame, text="30", bg=DARK_THEME.BG_MAIN, fg=DARK_THEME.FG_PRIMARY, width=4)
         self.radius_label.pack(side=tk.LEFT)
         
         # Outer Radius (for Band Pass)
-        tk.Label(ctrl_frame, text="Outer:", bg=self.BG_COLOR, fg=self.FG_COLOR).pack(side=tk.LEFT, padx=(20, 5))
+        tk.Label(ctrl_frame, text="Outer:", bg=DARK_THEME.BG_MAIN, fg=DARK_THEME.FG_PRIMARY).pack(side=tk.LEFT, padx=(20, 5))
         self.outer_radius = tk.IntVar(value=100)
         self.outer_scale = ttk.Scale(ctrl_frame, from_=1, to=300, variable=self.outer_radius,
                                      orient=tk.HORIZONTAL, length=100,
                                      command=self._on_radius_change)
         self.outer_scale.pack(side=tk.LEFT, padx=5)
-        self.outer_label = tk.Label(ctrl_frame, text="100", bg=self.BG_COLOR, fg=self.FG_COLOR, width=4)
+        self.outer_label = tk.Label(ctrl_frame, text="100", bg=DARK_THEME.BG_MAIN, fg=DARK_THEME.FG_PRIMARY, width=4)
         self.outer_label.pack(side=tk.LEFT)
         
         # Apply Button
         tk.Button(ctrl_frame, text="▶ Apply Filter", bg="#004400", fg="#00FF00",
-                 font=(self.FONT_FACE, 10, 'bold'),
+                 font=DARK_THEME.FONT_BOLD,
                  command=self._apply_filter).pack(side=tk.LEFT, padx=20)
         
         # Display Frame (3 panels)
-        display_frame = tk.Frame(self, bg=self.BG_COLOR)
+        display_frame = tk.Frame(self, bg=DARK_THEME.BG_MAIN)
         display_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         # Original Image
-        orig_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
+        orig_frame = tk.Frame(display_frame, bg=DARK_THEME.BG_MAIN)
         orig_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
-        tk.Label(orig_frame, text="ORIGINAL", bg=self.BG_COLOR, fg=self.FG_COLOR).pack()
-        self.orig_canvas = tk.Canvas(orig_frame, bg="#111", highlightthickness=0)
+        tk.Label(orig_frame, text="ORIGINAL", bg=DARK_THEME.BG_MAIN, fg=DARK_THEME.FG_PRIMARY).pack()
+        self.orig_canvas = tk.Canvas(orig_frame, bg=DARK_THEME.BG_CANVAS, highlightthickness=0)
         self.orig_canvas.pack(fill=tk.BOTH, expand=True)
         
         # FFT Spectrum
-        fft_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
+        fft_frame = tk.Frame(display_frame, bg=DARK_THEME.BG_MAIN)
         fft_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
-        tk.Label(fft_frame, text="FREQUENCY SPECTRUM", bg=self.BG_COLOR, fg=self.ACCENT_COLOR).pack()
-        self.fft_canvas = tk.Canvas(fft_frame, bg="#111", highlightthickness=0)
+        tk.Label(fft_frame, text="FREQUENCY SPECTRUM", bg=DARK_THEME.BG_MAIN, fg=DARK_THEME.ACCENT_INFO).pack()
+        self.fft_canvas = tk.Canvas(fft_frame, bg=DARK_THEME.BG_CANVAS, highlightthickness=0)
         self.fft_canvas.pack(fill=tk.BOTH, expand=True)
         
         # Filtered Result
-        result_frame = tk.Frame(display_frame, bg=self.BG_COLOR)
+        result_frame = tk.Frame(display_frame, bg=DARK_THEME.BG_MAIN)
         result_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
-        tk.Label(result_frame, text="FILTERED RESULT", bg=self.BG_COLOR, fg="#00FF00").pack()
-        self.result_canvas = tk.Canvas(result_frame, bg="#111", highlightthickness=0)
+        tk.Label(result_frame, text="FILTERED RESULT", bg=DARK_THEME.BG_MAIN, fg="#00FF00").pack()
+        self.result_canvas = tk.Canvas(result_frame, bg=DARK_THEME.BG_CANVAS, highlightthickness=0)
         self.result_canvas.pack(fill=tk.BOTH, expand=True)
         
         # Status
         self.status_var = tk.StringVar(value="Load an image to begin")
-        tk.Label(self, textvariable=self.status_var, bg="#222", fg=self.FG_COLOR,
-                font=(self.FONT_FACE, 9)).pack(fill=tk.X, side=tk.BOTTOM)
+        tk.Label(self, textvariable=self.status_var, bg="#222", fg=DARK_THEME.FG_PRIMARY,
+                font=DARK_THEME.FONT_MAIN).pack(fill=tk.X, side=tk.BOTTOM)
     
     def _load_image(self):
         """Load an image file."""
@@ -5317,6 +4475,11 @@ class TextureAnalysisWindow(tk.Toplevel):
         canvas.delete("all")
         canvas.create_image(cw // 2, ch // 2, image=photo, anchor=tk.CENTER)
         canvas.image = photo  # Keep reference
+# ==============================================================================
+
+#data aug
+
+# ==============================================================================
 
 
 # ==============================================================================

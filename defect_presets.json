@@ -1,15 +1,17 @@
 {
     "General": {
-        "sigma": 1.2,
-        "thresh": 0.65,
-        "block": 11,
-        "c": 2
-    },
-    "Scratches": {
         "sigma": 2.56,
         "thresh": 0.76,
         "block": 15,
-        "c": 2
+        "c": 2,
+        "defect_pct": 4.8
+    },
+    "Scratches": {
+        "sigma": 1.31,
+        "thresh": 0.76,
+        "block": 15,
+        "c": 2,
+        "defect_pct": 5.0
     },
     "Stains": {
         "sigma": 3.87,
@@ -22,5 +24,13 @@
         "thresh": 0.6,
         "block": 9,
         "c": 5
+    },
+    "irregular": {
+        "sigma": 1.2,
+        "thresh": 0.7,
+        "block": 15,
+        "c": 3,
+        "noise": 3,
+        "defect_pct": 20.0
     }
 }
